@@ -1,0 +1,12 @@
+# Python dependencies for the sky-model generation and analysis stages.
+# The CASA stages (casa_simulation.py, analysis.py) additionally require a
+# working CASA installation, which is NOT a pip package -- see the README.
+
+numpy
+h5py
+yt
+astropy
+matplotlib
+
+# Used only by the plotting cells in the original analysis notebooks.
+pandas
