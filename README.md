@@ -14,7 +14,7 @@ snapshots at very different disk sizes/inclinations.
 **Snapshot 170 — Orion — axis y**
 ![Snapshot 170, Orion, axis y](figures/snap170_Orion_axisy_three_panel.png)
 
-**Snapshot 386 — Orion — axis y**
+**Snapshot 386 — Orion — axis y** (zoomed to a ±600 AU / 1200 AU × 1200 AU field of view, revealing the spiral structure)
 ![Snapshot 386, Orion, axis y](figures/snap386_Orion_axisy_three_panel.png)
 
 ---

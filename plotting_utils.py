@@ -246,7 +246,7 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
     add_AU_ticks(ax_sky, sky_cx, sky_cy, sx0, sx1, sy0, sy1, sky_pix_as, distance_pc)
     ax_sky.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color="white")
     ax_sky.set_ylabel("ΔDec (AU)", color="white")
-    ax_sky.set_title(f"Skymodel  -- zoomed (±{zoom_factor} x Rmaj)", color="white")
+    ax_sky.set_title(f"Skymodel  -- zoomed (±{zoom_factor:.2f} x Rmaj)", color="white")
     ax_sky.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white", fontsize=6)
     add_colorbar(fig, im0, ax_sky, sky_hdr.get("BUNIT", "Jy/pixel"))
 
@@ -263,7 +263,7 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
     add_AU_ticks(ax_obs, pb_cx, pb_cy, px0, px1, py0, py1, pb_pix_as, distance_pc)
     ax_obs.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color="white")
     ax_obs.set_ylabel("ΔDec (AU)", color="white")
-    ax_obs.set_title(f"CASA Observation  -- zoomed (±{zoom_factor} x Rmaj)", color="white")
+    ax_obs.set_title(f"CASA Observation  -- zoomed (±{zoom_factor:.2f} x Rmaj)", color="white")
     ax_obs.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white")
     add_colorbar(fig, im1, ax_obs, pb_hdr.get("BUNIT", "Jy/beam"))
 
@@ -300,7 +300,7 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
     add_AU_ticks(ax_res, res_cx, res_cy, rx0, rx1, ry0, ry1, res_pix_as, distance_pc)
     ax_res.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color="white")
     ax_res.set_ylabel("ΔDec (AU)", color="white")
-    ax_res.set_title(f"imfit Residual  -- zoomed (±{zoom_factor} x Rmaj)", color="white")
+    ax_res.set_title(f"imfit Residual  -- zoomed (±{zoom_factor:.2f} x Rmaj)", color="white")
     ax_res.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white", fontsize=6)
     add_colorbar(fig, im2, ax_res, "Jy/beam  (obs - model)")
 
