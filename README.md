@@ -5,7 +5,21 @@ into **synthetic interferometer observations**, fitting those observations, and
 recovering disk dust masses — so that "observed" disk properties can be compared
 directly against the known simulation ground truth.
 
-The workflow has three stages:
+## Example output
+
+Three-panel QA figures produced by `plot_three_panel.py` (Stage 4): input
+skymodel, CASA synthetic observation, and imfit residual, for two Orion
+snapshots at very different disk sizes/inclinations.
+
+**Snapshot 170 — Orion — axis y**
+![Snapshot 170, Orion, axis y](figures/snap170_Orion_axisy_three_panel.png)
+
+**Snapshot 386 — Orion — axis y**
+![Snapshot 386, Orion, axis y](figures/snap386_Orion_axisy_three_panel.png)
+
+---
+
+The workflow has four stages:
 
 ```
  snapshots (.hdf5)
@@ -18,6 +32,9 @@ The workflow has three stages:
         │   analysis.py          (runs inside CASA, reads luminosities.json)
         ▼
  fitting_results.json   (fitted sizes/fluxes + predicted dust masses)
+        │   plot_three_panel.py
+        ▼
+ figures/   (skymodel | observation | residual QA figures, per snapshot/region/axis)
 ```
 
 ---
@@ -30,6 +47,8 @@ The workflow has three stages:
 | `visualization.ipynb` | Interactive sanity checks: inspect a snapshot, view emissivity/flux maps, compare a sky model against a CASA image. **Not required to run the pipeline.** | Jupyter |
 | `casa_simulation.py` | Runs `simobserve` → `tclean` → `impbcor` → `exportfits` to produce synthetic observed images. | Inside CASA |
 | `analysis.py` | Fits each observed image with `imfit` and converts the fitted flux into a dust mass. Combines the old `imfit_new.py` and `dust_prediction_code.py` into one pass over a folder. | Inside CASA |
+| `plot_three_panel.py` | Renders zoomed skymodel / observation / residual QA figures for each fitted disk in `fitting_results.json`. | Plain Python |
+| `plot_three_panel.ipynb` | Interactive version of the same three-panel plot, plus scratch analysis cells. **Not required to run the pipeline.** | Jupyter |
 
 ---
 
@@ -147,6 +166,30 @@ falls back to `--dust-temp` (default 43 K).
 
 ---
 
+## Stage 4 — Three-panel QA figures
+
+```bash
+python plot_three_panel.py \
+    --results fitting_results.json --skymodel-dir skymodels \
+    --pbcor-dir pbcor_imgs --residual-dir residual_imgs --out-dir figures
+```
+
+For every snapshot/region/axis present in `fitting_results.json` this writes
+a `snap<snapshot>_<Region>_axis<axis>_three_panel.png` to `--out-dir`, each
+showing the skymodel, the CASA observation, and the imfit residual side by
+side with the fitted Gaussian ellipse overlaid and the fit statistics
+annotated. Restrict the run with `--snapshots`, `--fields`, and `--axes`,
+e.g. `--snapshots 170 386 --fields Orion --axes y` to reproduce the figures
+shown at the top of this README.
+
+The core `plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir, ...)`
+function takes a `savefig` argument — an explicit output path that overrides
+the `out_dir`/auto-generated naming — so it can also be called directly
+(e.g. from `plot_three_panel.ipynb` or another script) to save a single
+figure wherever you like.
+
+---
+
 ## Output files
 
 | File / folder | Produced by | Contents |
@@ -156,6 +199,7 @@ falls back to `--dust-temp` (default 43 K).
 | `pbcor_imgs/` | Stage 2 | Synthetic pb-corrected observations |
 | `residual_imgs/`, `model_imgs/` | Stage 3 | imfit residual & model images |
 | `fitting_results.json` | Stage 3 | Fitted properties + predicted dust masses |
+| `figures/` | Stage 4 | Three-panel skymodel / observation / residual QA PNGs |
 
 ---
 
@@ -163,7 +207,7 @@ falls back to `--dust-temp` (default 43 K).
 
 - Snapshot **unit conventions are read from each file's header**, so the sky-model
   stage adapts to different runs without code changes.
-- The three stages communicate purely through **files and filename conventions**.
+- The four stages communicate purely through **files and filename conventions**.
   If you change a filename pattern in one stage, update the parsing in the next.
 - The scripts check-point as they go (writing JSON / FITS after each item), so a
   long run can be interrupted and resumed.
