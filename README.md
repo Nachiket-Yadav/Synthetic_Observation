@@ -188,6 +188,14 @@ the `out_dir`/auto-generated naming — so it can also be called directly
 (e.g. from `plot_three_panel.ipynb` or another script) to save a single
 figure wherever you like.
 
+`plotting_utils.py` also exposes `plot_three_panel_stack(snapshots, field,
+axis, results, pbcor_dir, skymodel_dir, residual_dir, ...)`, which renders
+the same three panels but as one row per snapshot in a single figure — handy
+for eyeballing a run of consecutive snapshots side by side. It optionally
+annotates each row with a fitted-vs-true dust mass comparison when given a
+`mass_dict` (per-snapshot true masses) and/or a `df` (a table with fitted
+masses); see its use in `plot_three_panel.ipynb`.
+
 ---
 
 ## Output files
