@@ -1,2 +1,4 @@
 *.fits
 *.hdf5
+__pycache__/
+*.pyc
