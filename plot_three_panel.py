@@ -29,6 +29,12 @@ Restrict to specific snapshots/regions/axes:
         --residual-dir residual_imgs --out-dir figures \\
         --snapshots 170 386 --fields Orion --axes y
 
+Plot the SKIRT variant instead of the default thin one (reads
+``*_SKIRT.fits`` skymodels/pbcor/residual files and, unless overridden,
+``fitting_results_skirt.json``):
+
+    python plot_three_panel.py --variant skirt --snapshots 170 --fields Orion --axes z
+
 Run ``python plot_three_panel.py --help`` for the full list of options.
 """
 
@@ -52,8 +58,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Make zoomed three-panel QA figures (skymodel | observation | residual)."
     )
-    parser.add_argument("--results", default="fitting_results.json",
-                         help="Fitting results JSON written by analysis.py (default: fitting_results.json).")
+    parser.add_argument("--results", default=None,
+                         help="Fitting results JSON written by analysis.py. Default: "
+                              "fitting_results.json for --variant thin, "
+                              "fitting_results_skirt.json for --variant skirt.")
     parser.add_argument("--skymodel-dir", default="skymodels",
                          help="Folder of stage-1 skymodel FITS files (default: skymodels).")
     parser.add_argument("--pbcor-dir", default="pbcor_imgs",
@@ -69,11 +77,27 @@ def main():
     parser.add_argument("--axes", nargs="+", default=["x", "y", "z"],
                          help="Projection axes to plot (default: x y z).")
     parser.add_argument("--zoom-factor", type=float, default=4,
-                         help="Zoom half-width in units of Rmaj (default: 4).")
+                         help="Zoom half-width in units of Rmaj (default: 4). Ignored when "
+                              "--fixed-au is given.")
+    parser.add_argument("--fixed-au", type=float, default=None,
+                         help="Fixed physical zoom half-width in AU, identical across the "
+                              "three panels regardless of pixel scale (default: None, i.e. "
+                              "keep the Rmaj-relative --zoom-factor zoom). Use this to compare "
+                              "thin and SKIRT figures at the same physical scale -- see "
+                              "plot_thin_vs_skirt.py for a figure that does this automatically.")
+    parser.add_argument("--variant", choices=["thin", "skirt"], default="thin",
+                         help="Which skymodel variant to plot: 'thin' (default, the original "
+                              "optically-thin pipeline -- unchanged behaviour) or 'skirt' (SKIRT "
+                              "Monte Carlo skymodels, reads/writes '*_SKIRT' files).")
     parser.add_argument("--dpi", type=int, default=130, help="Figure DPI (default: 130).")
     args = parser.parse_args()
 
-    with open(args.results, "r") as f:
+    suffix = "" if args.variant == "thin" else "_SKIRT"
+    results_path = args.results
+    if results_path is None:
+        results_path = "fitting_results.json" if args.variant == "thin" else "fitting_results_skirt.json"
+
+    with open(results_path, "r") as f:
         master_dict = json.load(f)
 
     snapshots = args.snapshots if args.snapshots else list(master_dict.keys())
@@ -87,17 +111,18 @@ def main():
                 fit = axes_dict.get(axis)
                 if fit is None:
                     continue
-                pbcor_fname = f"ALMA_snapshot_{snapshot}_axis_{axis}_{field}_sim_observed_pbcor.fits"
+                pbcor_fname = f"ALMA_snapshot_{snapshot}_axis_{axis}_{field}_sim_observed_pbcor{suffix}.fits"
                 pbcor_fpath = os.path.join(args.pbcor_dir, pbcor_fname)
                 if not os.path.exists(pbcor_fpath):
                     print(f"[skip] pbcor not found: {pbcor_fname}")
                     continue
                 print(f"Plotting: snapshot {snapshot} | {field} | axis {axis}")
-                out_fname = f"snap{snapshot}_{field}_axis{axis}_three_panel.png"
+                out_fname = f"snap{snapshot}_{field}_axis{axis}{suffix}_three_panel.png"
                 saved = plot_three_panel(
                     pbcor_fpath, fit, args.skymodel_dir, args.residual_dir,
                     zoom_factor=args.zoom_factor, dpi=args.dpi,
                     savefig=os.path.join(args.out_dir, out_fname),
+                    suffix=suffix, fixed_au=args.fixed_au,
                 )
                 if saved:
                     n_saved += 1

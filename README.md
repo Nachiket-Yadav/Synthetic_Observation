@@ -47,8 +47,11 @@ The workflow has four stages:
 | `visualization.ipynb` | Interactive sanity checks: inspect a snapshot, view emissivity/flux maps, compare a sky model against a CASA image. **Not required to run the pipeline.** | Jupyter |
 | `casa_simulation.py` | Runs `simobserve` → `tclean` → `impbcor` → `exportfits` to produce synthetic observed images. | Inside CASA |
 | `analysis.py` | Fits each observed image with `imfit` and converts the fitted flux into a dust mass. Combines the old `imfit_new.py` and `dust_prediction_code.py` into one pass over a folder. | Inside CASA |
-| `plot_three_panel.py` | Renders zoomed skymodel / observation / residual QA figures for each fitted disk in `fitting_results.json`. | Plain Python |
+| `plot_three_panel.py` | Renders zoomed skymodel / observation / residual QA figures for each fitted disk in `fitting_results.json`. Supports `--variant {thin,skirt}`. | Plain Python |
 | `plot_three_panel.ipynb` | Interactive version of the same three-panel plot, plus scratch analysis cells. **Not required to run the pipeline.** | Jupyter |
+| `casa_simulation_skirt.py` | SKIRT-variant counterpart to `casa_simulation.py` -- same `simobserve`/`tclean`/`impbcor`/`exportfits` pipeline, byte-identical observing parameters, run on SKIRT sky models instead. | Inside CASA |
+| `analysis_skirt.py` | SKIRT-variant counterpart to `analysis.py`. Writes to `fitting_results_skirt.json` instead of `fitting_results.json`. | Inside CASA |
+| `plot_thin_vs_skirt.py` | Two-row QA figure comparing the thin and SKIRT pipelines for one snapshot/region/axis at a shared physical zoom. | Plain Python |
 
 ---
 
@@ -198,16 +201,102 @@ masses); see its use in `plot_three_panel.ipynb`.
 
 ---
 
+## SKIRT variant
+
+Stage 1 has a second, independent path: **SKIRT** Monte Carlo radiative-transfer
+sky models, produced *outside* this repo and dropped into `skymodels/` already
+in the same FITS convention as the thin sky models (`BUNIT=Jy/pixel`,
+`CTYPE=LINEAR`, `CDELT` in deg, `PARC` in arcsec/pix). `skymodel_generation.py`
+itself is untouched -- SKIRT sky models are simply additional files placed
+alongside the thin ones.
+
+Stages 2-4 support both variants side by side so the two can be compared
+directly for the same snapshot:
+
+| Stage | Thin (default) | SKIRT |
+|-------|-----------------|-------|
+| 2 — CASA simulation | `casa_simulation.py` | `casa_simulation_skirt.py` |
+| 3 — Fit & dust mass | `analysis.py` | `analysis_skirt.py` |
+| 4 — QA figures | `plot_three_panel.py` (`--variant thin`, the default) | `plot_three_panel.py --variant skirt` |
+
+Each SKIRT driver is a **separate file**, not a flag on the thin one, so the
+existing thin pipeline is guaranteed untouched: every thin command, filename,
+and `fitting_results.json` entry keeps working exactly as before whether or
+not any SKIRT files exist.
+
+**Naming convention.** The SKIRT variant of a file is the thin filename with
+`_SKIRT` appended to the stem, immediately before the extension (or before a
+trailing `_residual`/`_model`), and lives in the *same* folder as the thin
+file:
+
+```
+skymodels/snapshot_170_Orion_flux_map_ALMA_axis_z.fits            (thin)
+skymodels/snapshot_170_Orion_flux_map_ALMA_axis_z_SKIRT.fits      (SKIRT)
+
+pbcor_imgs/ALMA_snapshot_170_axis_z_Orion_sim_observed_pbcor.fits
+pbcor_imgs/ALMA_snapshot_170_axis_z_Orion_sim_observed_pbcor_SKIRT.fits
+
+residual_imgs/ALMA_snapshot_170_axis_z_Orion_sim_observed_pbcor_SKIRT_residual.fits
+model_imgs/ALMA_snapshot_170_axis_z_Orion_sim_observed_pbcor_SKIRT_model.fits
+```
+
+Because the `_SKIRT` suffix comes at the very end, it doesn't disturb the
+positional filename parsing (`split("_")`) used for the pbcor/residual/model
+files elsewhere in the pipeline. The one place it *would* (the sky-model
+filename, where the axis letter is the last token before the extension) is
+handled with an explicit regex parser in `casa_simulation_skirt.py`
+(`parse_skirt_skymodel_filename`) instead of a positional split.
+
+**Separate results file.** `analysis_skirt.py` writes to
+`fitting_results_skirt.json` by default -- never `fitting_results.json` --
+keyed with the same `{ snapshot: { region: { axis: {...} } } }` schema as the
+thin results. This is what makes the thin plotting driver (and any other
+existing consumer of `fitting_results.json`) require zero changes: SKIRT fits
+can never collide with or overwrite a thin entry for the same
+snapshot/region/axis.
+
+Because SKIRT pbcor/skymodel files can live in the same folders as the thin
+ones, both `casa_simulation_skirt.py` and `analysis_skirt.py` default their
+`--glob` to `*_SKIRT.fits` so a SKIRT run only ever touches SKIRT files. If
+you re-run the *thin* `analysis.py` after SKIRT pbcor images already exist in
+`pbcor_imgs/`, its default `--glob "*.fits"` would pick those up too -- pass
+an explicit thin-only glob, e.g. `--glob "*_sim_observed_pbcor.fits"`
+(SKIRT files end in `_pbcor_SKIRT.fits` and don't match), to avoid that.
+
+**Comparing the two.** `plot_thin_vs_skirt.py` renders a two-row figure (thin
+on top, SKIRT on the bottom) for one snapshot/region/axis:
+
+```bash
+python plot_thin_vs_skirt.py --snapshot 170 --field Orion --axis z \
+    --thin-results fitting_results.json \
+    --skirt-results fitting_results_skirt.json \
+    --out-dir figures
+```
+
+imfit measures very different disk sizes on the two variants of the same
+disk (e.g. Rmaj = 0.151" / 30 AU on the thin image of snapshot 170 vs. 1.197"
+/ 239 AU on its SKIRT image), so the default Rmaj-relative zoom used
+elsewhere in this repo would put the two rows at different physical scales.
+`plot_thin_vs_skirt.py` instead defaults to `--fixed-au 300`: both rows are
+cropped to the same physical half-width (in AU, not pixels), and the top
+row's skymodel/observation colour scale is reused for the bottom row, so the
+six panels are genuinely comparable. `plot_three_panel.py` also accepts
+`--fixed-au` directly if you want a single-variant figure at a fixed
+physical scale instead of the default Rmaj-relative zoom.
+
+---
+
 ## Output files
 
 | File / folder | Produced by | Contents |
 |---------------|-------------|----------|
-| `skymodels/` | Stage 1 | Sky-model FITS images |
-| `luminosities.json` | Stage 1 | Per-snapshot total protostellar luminosity (Lsun) |
-| `pbcor_imgs/` | Stage 2 | Synthetic pb-corrected observations |
-| `residual_imgs/`, `model_imgs/` | Stage 3 | imfit residual & model images |
-| `fitting_results.json` | Stage 3 | Fitted properties + predicted dust masses |
-| `figures/` | Stage 4 | Three-panel skymodel / observation / residual QA PNGs |
+| `skymodels/` | Stage 1 | Sky-model FITS images (thin and, if present, `*_SKIRT` variants) |
+| `luminosities.json` | Stage 1 | Per-snapshot total protostellar luminosity (Lsun); shared by both variants |
+| `pbcor_imgs/` | Stage 2 / Stage 2 (SKIRT) | Synthetic pb-corrected observations (thin and `*_SKIRT`) |
+| `residual_imgs/`, `model_imgs/` | Stage 3 / Stage 3 (SKIRT) | imfit residual & model images (thin and `*_SKIRT`) |
+| `fitting_results.json` | Stage 3 (`analysis.py`) | Thin fitted properties + predicted dust masses |
+| `fitting_results_skirt.json` | Stage 3 (`analysis_skirt.py`) | SKIRT fitted properties + predicted dust masses, same schema, kept separate |
+| `figures/` | Stage 4 | Three-panel QA PNGs (thin, SKIRT, and thin-vs-SKIRT comparison) |
 
 ---
 
@@ -219,4 +308,6 @@ masses); see its use in `plot_three_panel.ipynb`.
   If you change a filename pattern in one stage, update the parsing in the next.
 - The scripts check-point as they go (writing JSON / FITS after each item), so a
   long run can be interrupted and resumed.
+- See the "SKIRT variant" section above for the `_SKIRT` naming convention and
+  the separate `fitting_results_skirt.json`.
 

@@ -3,8 +3,20 @@ plotting_utils.py
 ==================
 
 Shared helpers for the three-panel QA figures (skymodel | CASA pbcor
-observation | imfit residual), used by both ``plot_three_panel.py`` (CLI
-batch driver) and ``plot_three_panel.ipynb`` (interactive exploration).
+observation | imfit residual), used by ``plot_three_panel.py`` (CLI batch
+driver, thin variant), ``plot_thin_vs_skirt.py`` (thin-vs-SKIRT comparison
+driver), and ``plot_three_panel.ipynb`` (interactive exploration).
+
+Two skymodel variants
+----------------------
+The pipeline supports two independent skymodel sources for the same
+snapshot: ``thin`` (the original optically-thin yt projection) and
+``skirt`` (SKIRT Monte Carlo radiative transfer, produced outside this
+repo). Every filename the SKIRT variant reads or writes is the thin
+filename with ``_SKIRT`` appended to the stem, immediately before the
+extension -- see ``suffix`` below. Threading a ``suffix`` parameter
+through the filename construction (rather than duplicating this module)
+is what lets both variants share one rendering code path.
 """
 
 from __future__ import annotations
@@ -19,6 +31,12 @@ from astropy.io import fits
 
 
 DISTANCES_PC = {"Orion": 400, "Perseus": 300}
+
+# Filename-stem suffix for each skymodel variant. Appended immediately
+# before the extension (or before a trailing "_residual"/"_model") so that
+# positional parsing done elsewhere in the pipeline (e.g. filename.split("_"))
+# is unaffected wherever the parsed field comes before the suffix.
+VARIANT_SUFFIXES = {"thin": "", "skirt": "_SKIRT"}
 
 
 # ---------------------------------------------------------------------------
@@ -61,9 +79,23 @@ def make_residual_norm(data):
     return TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
 
 
-def zoom_bounds(cx, cy, Rmaj_pix, nx, ny, factor=4):
-    """Return (x0, x1, y0, y1) pixel bounds for a zoomed cutout."""
-    r = max(int(Rmaj_pix * factor), 30)
+def zoom_bounds(cx, cy, Rmaj_pix, nx, ny, factor=4,
+                 fixed_au=None, pix_as=None, distance_pc=400.0):
+    """Pixel bounds for a zoomed cutout.
+
+    fixed_au : fixed PHYSICAL half-width in AU, identical across panels and
+        rows -- required for like-for-like comparison (e.g. thin vs. SKIRT,
+        which fit very different Rmaj for the same disk). Requires
+        ``pix_as`` (this image's own arcsec/pixel scale) to also be given.
+        Falls back to ``factor * Rmaj_pix`` with a 30-PIXEL floor, which is
+        scale-dependent (e.g. 26 AU on a 0.86 AU/pix skymodel vs. 360 AU on
+        a 12 AU/pix pbcor image of the same disk) -- fine within one image,
+        not comparable across images of different pixel scale.
+    """
+    if fixed_au is not None and pix_as is not None:
+        r = int(round(fixed_au / (pix_as * distance_pc)))
+    else:
+        r = max(int(Rmaj_pix * factor), 30)
     return (
         max(int(cx) - r, 0), min(int(cx) + r, nx),
         max(int(cy) - r, 0), min(int(cy) + r, ny),
@@ -78,8 +110,11 @@ def add_AU_ticks(ax, cx, cy, x0, x1, y0, y1, pix_scale, distance_pc, n_ticks=5):
     magnitude = 10 ** np.floor(np.log10(max(raw_step, 1e-10)))
     nice = magnitude * min([1, 2, 5, 10], key=lambda x: abs(x - raw_step / magnitude))
     step_AU = max(nice, 1.0)
-    xtick_AU = np.arange(-hw_x_AU, hw_x_AU + step_AU, step_AU)
-    ytick_AU = np.arange(-hw_y_AU, hw_y_AU + step_AU, step_AU)
+    # Symmetric tick construction: kx/ky ticks on either side of the centre,
+    # never overshooting [-hw_AU, +hw_AU] (np.arange(-hw, hw+step, step) used
+    # to overshoot by one step, producing asymmetric labels like -180..220).
+    kx = int(np.floor(hw_x_AU / step_AU)); xtick_AU = np.arange(-kx, kx + 1) * step_AU
+    ky = int(np.floor(hw_y_AU / step_AU)); ytick_AU = np.arange(-ky, ky + 1) * step_AU
     pix_per_AU = 1.0 / (pix_scale * distance_pc)
     ax.set_xticks(xtick_AU * pix_per_AU + cx)
     ax.set_xticklabels([f"{v:.0f}" for v in xtick_AU], color="white")
@@ -117,40 +152,51 @@ def add_colorbar(fig, im, ax, label):
 
 
 # ---------------------------------------------------------------------------
-# Three-panel plot
+# Shared row renderer -- one disk, three panels, into caller-supplied axes
 # ---------------------------------------------------------------------------
-def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
-                      zoom_factor=4, cmap="jet", dpi=130,
-                      save=True, out_dir="figures", savefig=None, show=False):
-    """Render one row of three zoomed panels for a single fitted disk.
+def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
+                     skymodel_dir, residual_dir, zoom_factor=4, cmap="jet",
+                     suffix="", fixed_au=None,
+                     sky_norm=None, obs_norm=None, res_norm=None,
+                     title_prefix=None):
+    """Render one row of [skymodel | pbcor | residual] panels into the given axes.
 
-      [0] Skymodel (zoomed)
-      [1] CASA pbcor observation (zoomed)
-      [2] imfit residual image (zoomed, diverging colormap)
-
-    The Gaussian ellipse from ``fit`` is overlaid on all three panels.
+    This is the single rendering code path shared by ``plot_three_panel``
+    (one row, thin *or* SKIRT depending on ``suffix``) and
+    ``plot_thin_vs_skirt.py`` (two rows, one thin + one SKIRT, sharing axes
+    limits/colour scale via ``fixed_au``/``sky_norm``/``obs_norm``). Keeping
+    exactly one copy of this logic is what guarantees the two variants are
+    rendered identically apart from the input files and the requested zoom.
 
     Parameters
     ----------
-    pbcor_fpath   : str  -- path to the pbcor FITS file
-    fit           : dict -- entry from fitting_results[snapshot][field][axis]
-    skymodel_dir  : str  -- folder containing the stage-1 skymodel FITS files
-    residual_dir  : str  -- folder containing the stage-3 residual FITS files
-    zoom_factor   : int  -- half-width of the zoom, in units of Rmaj
-    save          : bool -- whether to save a PNG at all
-    out_dir       : str  -- folder to save into when ``savefig`` is not given
-    savefig       : str or None -- if given, save the PNG to this exact path
-                    (overrides ``out_dir``/auto-generated naming); parent
-                    directories are created as needed
-    show          : bool -- whether to display the figure inline (e.g. in a
-                    notebook) before closing it
+    fig                     : Figure -- needed for colorbars.
+    ax_sky, ax_obs, ax_res  : Axes -- panels to draw into (already styled).
+    pbcor_fpath             : str  -- path to the pbcor FITS file.
+    fit                     : dict -- entry from fitting_results[snapshot][field][axis].
+    skymodel_dir, residual_dir : str -- folders for the other two stages.
+    suffix                  : str  -- "" for thin, "_SKIRT" for the SKIRT
+                              variant; selects which skymodel/residual files
+                              are loaded alongside ``pbcor_fpath``.
+    fixed_au                : float or None -- fixed physical zoom half-width
+                              in AU, identical across all three panels; see
+                              ``zoom_bounds``. None keeps the original
+                              Rmaj-relative zoom (``zoom_factor``).
+    sky_norm, obs_norm, res_norm : Normalize or None -- reuse an existing
+                              colour norm instead of computing one from this
+                              row's data (for cross-row comparability).
+    title_prefix            : str or None -- prefixed to panel titles and the
+                              annotation box, e.g. "THIN" / "SKIRT".
 
     Returns
     -------
-    str or None -- the path the figure was saved to, or None if not saved.
+    dict or None -- metadata about what was drawn (snapshot/field/axis, the
+    norms actually used, fit validity), or None if a required file was
+    missing (nothing was drawn).
     """
-
-    # -- Parse filename --------------------------------------------------
+    # -- Parse filename (variant-independent: snapshot/axis/field always sit
+    #    at the same split() indices regardless of a trailing _SKIRT/suffix,
+    #    since the suffix is appended after these fields in every filename). --
     fname = os.path.basename(pbcor_fpath)
     parts = fname.replace(".fits", "").split("_")
     snapshot = parts[2]
@@ -168,7 +214,7 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
     pb_cx, pb_cy = pb_nx / 2.0, pb_ny / 2.0
 
     # -- Load skymodel -------------------------------------------------------
-    sky_fname = f"snapshot_{snapshot}_{field}_flux_map_ALMA_axis_{axis}.fits"
+    sky_fname = f"snapshot_{snapshot}_{field}_flux_map_ALMA_axis_{axis}{suffix}.fits"
     sky_fpath = os.path.join(skymodel_dir, sky_fname)
     if not os.path.exists(sky_fpath):
         print(f"[warn] skymodel not found: {sky_fpath}")
@@ -181,7 +227,7 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
     sky_cx, sky_cy = sky_nx / 2.0, sky_ny / 2.0
 
     # -- Load residual ---------------------------------------------------------
-    res_fname = f"ALMA_snapshot_{snapshot}_axis_{axis}_{field}_sim_observed_pbcor_residual.fits"
+    res_fname = f"ALMA_snapshot_{snapshot}_axis_{axis}_{field}_sim_observed_pbcor{suffix}_residual.fits"
     res_fpath = os.path.join(residual_dir, res_fname)
     if not os.path.exists(res_fpath):
         print(f"[warn] residual not found: {res_fpath}")
@@ -194,15 +240,15 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
     res_cx, res_cy = res_nx / 2.0, res_ny / 2.0
 
     # -- Fit parameters ---------------------------------------------------------
-    Rmaj_as = fit["Rmaj"]
-    Rmin_as = fit["Rmin"]
-    pa_deg = fit["pa"]
-    inc = fit["inc"]
-    r_AU_T = fit["radius_AU_Tobin"]
-    flux = fit["flux"]
-    snr = fit["snr"]
-    prf = fit["peak_residual_fraction"]
-    peak_res = fit["peak_residual"]
+    Rmaj_as = fit.get("Rmaj")
+    Rmin_as = fit.get("Rmin")
+    pa_deg = fit.get("pa")
+    inc = fit.get("inc")
+    r_AU_T = fit.get("radius_AU_Tobin")
+    flux = fit.get("flux")
+    snr = fit.get("snr")
+    prf = fit.get("peak_residual_fraction")
+    peak_res = fit.get("peak_residual")
 
     fit_valid = all(
         v is not None and not (isinstance(v, float) and np.isnan(v))
@@ -226,17 +272,16 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
         res_Rmaj_pix = res_nx * 0.1
         mpl_angle = 0
 
-    # -- Figure ---------------------------------------------------------------
-    fig, axes = plt.subplots(1, 3, figsize=(24, 6), gridspec_kw={"wspace": 0.35})
-    fig.patch.set_facecolor("#0d0d0d")
-    for ax in axes:
-        style_ax(ax)
-    ax_sky, ax_obs, ax_res = axes
+    zoom_label = f"±{fixed_au:.0f} AU" if fixed_au is not None else f"±{zoom_factor:.2f} x Rmaj"
+    prefix = f"{title_prefix} " if title_prefix else ""
 
     # Panel 0: Skymodel zoomed
-    sx0, sx1, sy0, sy1 = zoom_bounds(sky_cx, sky_cy, sk_Rmaj_pix, sky_nx, sky_ny, factor=zoom_factor)
+    sx0, sx1, sy0, sy1 = zoom_bounds(sky_cx, sky_cy, sk_Rmaj_pix, sky_nx, sky_ny,
+                                      factor=zoom_factor, fixed_au=fixed_au,
+                                      pix_as=sky_pix_as, distance_pc=distance_pc)
     szd = sky_data[sy0:sy1, sx0:sx1]
-    im0 = ax_sky.imshow(szd, origin="lower", cmap=cmap, norm=make_norm(szd), extent=[sx0, sx1, sy0, sy1])
+    used_sky_norm = sky_norm if sky_norm is not None else make_norm(szd)
+    im0 = ax_sky.imshow(szd, origin="lower", cmap=cmap, norm=used_sky_norm, extent=[sx0, sx1, sy0, sy1])
     if fit_valid:
         draw_ellipse_on_ax(ax_sky, sky_cx, sky_cy, sk_Rmaj_pix, sk_Rmin_pix, mpl_angle)
     ax_sky.axhline(sky_cy, color="white", lw=0.4, alpha=0.35)
@@ -246,14 +291,17 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
     add_AU_ticks(ax_sky, sky_cx, sky_cy, sx0, sx1, sy0, sy1, sky_pix_as, distance_pc)
     ax_sky.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color="white")
     ax_sky.set_ylabel("ΔDec (AU)", color="white")
-    ax_sky.set_title(f"Skymodel  -- zoomed (±{zoom_factor:.2f} x Rmaj)", color="white")
+    ax_sky.set_title(f"{prefix}Skymodel  -- zoomed ({zoom_label})", color="white")
     ax_sky.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white", fontsize=6)
     add_colorbar(fig, im0, ax_sky, sky_hdr.get("BUNIT", "Jy/pixel"))
 
     # Panel 1: CASA pbcor zoomed
-    px0, px1, py0, py1 = zoom_bounds(pb_cx, pb_cy, pb_Rmaj_pix, pb_nx, pb_ny, factor=zoom_factor)
+    px0, px1, py0, py1 = zoom_bounds(pb_cx, pb_cy, pb_Rmaj_pix, pb_nx, pb_ny,
+                                      factor=zoom_factor, fixed_au=fixed_au,
+                                      pix_as=pb_pix_as, distance_pc=distance_pc)
     pzd = pb_data[py0:py1, px0:px1]
-    im1 = ax_obs.imshow(pzd, origin="lower", cmap=cmap, norm=make_norm(pzd), extent=[px0, px1, py0, py1])
+    used_obs_norm = obs_norm if obs_norm is not None else make_norm(pzd)
+    im1 = ax_obs.imshow(pzd, origin="lower", cmap=cmap, norm=used_obs_norm, extent=[px0, px1, py0, py1])
     if fit_valid:
         draw_ellipse_on_ax(ax_obs, pb_cx, pb_cy, pb_Rmaj_pix, pb_Rmin_pix, mpl_angle)
     ax_obs.axhline(pb_cy, color="white", lw=0.4, alpha=0.35)
@@ -263,12 +311,14 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
     add_AU_ticks(ax_obs, pb_cx, pb_cy, px0, px1, py0, py1, pb_pix_as, distance_pc)
     ax_obs.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color="white")
     ax_obs.set_ylabel("ΔDec (AU)", color="white")
-    ax_obs.set_title(f"CASA Observation  -- zoomed (±{zoom_factor:.2f} x Rmaj)", color="white")
+    ax_obs.set_title(f"{prefix}CASA Observation  -- zoomed ({zoom_label})", color="white")
     ax_obs.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white")
     add_colorbar(fig, im1, ax_obs, pb_hdr.get("BUNIT", "Jy/beam"))
 
+    header_line = f"{title_prefix}\n" if title_prefix else ""
     if fit_valid:
         info = (
+            header_line +
             f"snap {snapshot}  |  {field}  |  axis {axis}\n"
             f"Rmaj = {Rmaj_as:.3f}\"  ({Rmaj_AU / 2:.0f} AU)\n"
             f"Rmin = {Rmin_as:.3f}\"  ({Rmin_AU / 2:.0f} AU)\n"
@@ -283,14 +333,17 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
                     color="white", family="monospace",
                     bbox=dict(boxstyle="round,pad=0.4", facecolor="#111", edgecolor="cyan", alpha=0.88))
     else:
-        ax_obs.text(0.02, 0.98, f"snap {snapshot}  |  {field}  |  axis {axis}\nFit failed -- no Gaussian parameters",
+        ax_obs.text(0.02, 0.98, header_line + f"snap {snapshot}  |  {field}  |  axis {axis}\nFit failed -- no Gaussian parameters",
                     transform=ax_obs.transAxes, va="top", ha="left", color="orange", family="monospace",
                     bbox=dict(boxstyle="round,pad=0.4", facecolor="#111", edgecolor="orange", alpha=0.88))
 
     # Panel 2: Residual zoomed
-    rx0, rx1, ry0, ry1 = zoom_bounds(res_cx, res_cy, res_Rmaj_pix, res_nx, res_ny, factor=zoom_factor)
+    rx0, rx1, ry0, ry1 = zoom_bounds(res_cx, res_cy, res_Rmaj_pix, res_nx, res_ny,
+                                      factor=zoom_factor, fixed_au=fixed_au,
+                                      pix_as=res_pix_as, distance_pc=distance_pc)
     rzd = res_data[ry0:ry1, rx0:rx1]
-    im2 = ax_res.imshow(rzd, origin="lower", cmap="RdBu_r", norm=make_residual_norm(rzd), extent=[rx0, rx1, ry0, ry1])
+    used_res_norm = res_norm if res_norm is not None else make_residual_norm(rzd)
+    im2 = ax_res.imshow(rzd, origin="lower", cmap="RdBu_r", norm=used_res_norm, extent=[rx0, rx1, ry0, ry1])
     if fit_valid:
         draw_ellipse_on_ax(ax_res, res_cx, res_cy, res_Rmaj_pix, res_Rmin_pix, mpl_angle, color="black", ls="--")
     ax_res.axhline(res_cy, color="gray", lw=0.4, alpha=0.35)
@@ -300,9 +353,75 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
     add_AU_ticks(ax_res, res_cx, res_cy, rx0, rx1, ry0, ry1, res_pix_as, distance_pc)
     ax_res.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color="white")
     ax_res.set_ylabel("ΔDec (AU)", color="white")
-    ax_res.set_title(f"imfit Residual  -- zoomed (±{zoom_factor:.2f} x Rmaj)", color="white")
+    ax_res.set_title(f"{prefix}imfit Residual  -- zoomed ({zoom_label})", color="white")
     ax_res.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white", fontsize=6)
     add_colorbar(fig, im2, ax_res, "Jy/beam  (obs - model)")
+
+    return {
+        "snapshot": snapshot, "field": field, "axis": axis,
+        "distance_pc": distance_pc, "fit_valid": fit_valid,
+        "sky_norm": used_sky_norm, "obs_norm": used_obs_norm, "res_norm": used_res_norm,
+        "sky_extent": (sx0, sx1, sy0, sy1), "pb_extent": (px0, px1, py0, py1),
+        "res_extent": (rx0, rx1, ry0, ry1),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Three-panel plot
+# ---------------------------------------------------------------------------
+def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
+                      zoom_factor=4, cmap="jet", dpi=130,
+                      save=True, out_dir="figures", savefig=None, show=False,
+                      suffix="", fixed_au=None):
+    """Render one row of three zoomed panels for a single fitted disk.
+
+      [0] Skymodel (zoomed)
+      [1] CASA pbcor observation (zoomed)
+      [2] imfit residual image (zoomed, diverging colormap)
+
+    The Gaussian ellipse from ``fit`` is overlaid on all three panels.
+    All the actual loading/drawing happens in ``render_disk_row`` -- this
+    function just sets up the figure/axes and handles saving.
+
+    Parameters
+    ----------
+    pbcor_fpath   : str  -- path to the pbcor FITS file
+    fit           : dict -- entry from fitting_results[snapshot][field][axis]
+    skymodel_dir  : str  -- folder containing the stage-1 skymodel FITS files
+    residual_dir  : str  -- folder containing the stage-3 residual FITS files
+    zoom_factor   : int  -- half-width of the zoom, in units of Rmaj
+    save          : bool -- whether to save a PNG at all
+    out_dir       : str  -- folder to save into when ``savefig`` is not given
+    savefig       : str or None -- if given, save the PNG to this exact path
+                    (overrides ``out_dir``/auto-generated naming); parent
+                    directories are created as needed
+    show          : bool -- whether to display the figure inline (e.g. in a
+                    notebook) before closing it
+    suffix        : str  -- "" for the thin pipeline (default, unchanged
+                    behaviour), "_SKIRT" to load the SKIRT-variant skymodel
+                    and residual files alongside ``pbcor_fpath``.
+    fixed_au      : float or None -- fixed physical zoom half-width in AU
+                    shared by all three panels (see ``zoom_bounds``).
+                    Default None preserves the original Rmaj-relative zoom.
+
+    Returns
+    -------
+    str or None -- the path the figure was saved to, or None if not saved.
+    """
+
+    fig, axes = plt.subplots(1, 3, figsize=(24, 6), gridspec_kw={"wspace": 0.35})
+    fig.patch.set_facecolor("#0d0d0d")
+    for ax in axes:
+        style_ax(ax)
+    ax_sky, ax_obs, ax_res = axes
+
+    info = render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
+                            skymodel_dir, residual_dir, zoom_factor=zoom_factor,
+                            cmap=cmap, suffix=suffix, fixed_au=fixed_au)
+    if info is None:
+        plt.close(fig)
+        return None
+    snapshot, field, axis = info["snapshot"], info["field"], info["axis"]
 
     # -- Save --------------------------------------------------------------
     plt.tight_layout()
@@ -313,7 +432,7 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
         saved_path = savefig
     elif save and out_dir:
         os.makedirs(out_dir, exist_ok=True)
-        out_fname = f"snap{snapshot}_{field}_axis{axis}_three_panel.png"
+        out_fname = f"snap{snapshot}_{field}_axis{axis}{suffix}_three_panel.png"
         saved_path = os.path.join(out_dir, out_fname)
         fig.savefig(saved_path, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
     if show:
@@ -331,7 +450,7 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
 def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_dir, residual_dir,
                             zoom_factor=3, cmap="jet", vmin_pct=0, vmax_pct=99.5, log_scale=False,
                             dpi=130, save=True, out_dir="figures", savefig=None, show=False,
-                            mass_dict=None, df=None):
+                            mass_dict=None, df=None, suffix="", fixed_au=None):
     """Stack multiple snapshots as rows of three zoomed panels each:
 
       [0] Skymodel (zoomed)
@@ -357,6 +476,11 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
                    used to annotate the true dust mass (κ=1e-8 entry, index 2)
     df           : DataFrame or None -- optional table with columns
                    snapshot/field/axis/mass_fit_Msun, used to annotate the fitted mass
+    suffix       : str  -- "" for thin (default, unchanged behaviour), "_SKIRT"
+                   to stack the SKIRT variant instead.
+    fixed_au     : float or None -- fixed physical zoom half-width in AU,
+                   identical across all rows/panels. Default None preserves
+                   the original Rmaj-relative zoom.
 
     Returns
     -------
@@ -381,7 +505,7 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
         distance_pc = DISTANCES_PC.get(field, 400)
 
         # -- Load pbcor ------------------------------------------------------
-        pbcor_fname = f"ALMA_snapshot_{snapshot}_axis_{axis}_{field}_sim_observed_pbcor.fits"
+        pbcor_fname = f"ALMA_snapshot_{snapshot}_axis_{axis}_{field}_sim_observed_pbcor{suffix}.fits"
         pbcor_fpath = os.path.join(pbcor_dir, pbcor_fname)
         if not os.path.exists(pbcor_fpath):
             print(f"[skip] pbcor not found: {pbcor_fname}")
@@ -398,7 +522,7 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
         pb_cx, pb_cy = pb_nx / 2.0, pb_ny / 2.0
 
         # -- Load skymodel -----------------------------------------------------
-        sky_fname = f"snapshot_{snapshot}_{field}_flux_map_ALMA_axis_{axis}.fits"
+        sky_fname = f"snapshot_{snapshot}_{field}_flux_map_ALMA_axis_{axis}{suffix}.fits"
         sky_fpath = os.path.join(skymodel_dir, sky_fname)
         if not os.path.exists(sky_fpath):
             print(f"[skip] skymodel not found: {sky_fname}")
@@ -411,7 +535,7 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
         sky_cx, sky_cy = sky_nx / 2.0, sky_ny / 2.0
 
         # -- Load residual -------------------------------------------------------
-        res_fname = f"ALMA_snapshot_{snapshot}_axis_{axis}_{field}_sim_observed_pbcor_residual.fits"
+        res_fname = f"ALMA_snapshot_{snapshot}_axis_{axis}_{field}_sim_observed_pbcor{suffix}_residual.fits"
         res_fpath = os.path.join(residual_dir, res_fname)
         if not os.path.exists(res_fpath):
             print(f"[skip] residual not found: {res_fname}")
@@ -474,7 +598,9 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
                 true_mass = mass_dict[key][2]  # index 2 = 1e-8 opacity
 
         # -- Panel 0: Skymodel ----------------------------------------------------
-        sx0, sx1, sy0, sy1 = zoom_bounds(sky_cx, sky_cy, sk_Rmaj_pix, sky_nx, sky_ny, factor=zoom_factor)
+        sx0, sx1, sy0, sy1 = zoom_bounds(sky_cx, sky_cy, sk_Rmaj_pix, sky_nx, sky_ny,
+                                          factor=zoom_factor, fixed_au=fixed_au,
+                                          pix_as=sky_pix_as, distance_pc=distance_pc)
         szd = sky_data[sy0:sy1, sx0:sx1]
         im0 = ax_sky.imshow(szd, origin="lower", cmap=cmap,
                              norm=make_norm(szd, vmin_pct=vmin_pct, vmax_pct=vmax_pct, log_scale=log_scale),
@@ -492,7 +618,9 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
         add_colorbar(fig, im0, ax_sky, sky_hdr.get("BUNIT", "Jy/pixel"))
 
         # -- Panel 1: CASA pbcor ---------------------------------------------------
-        px0, px1, py0, py1 = zoom_bounds(pb_cx, pb_cy, pb_Rmaj_pix, pb_nx, pb_ny, factor=zoom_factor)
+        px0, px1, py0, py1 = zoom_bounds(pb_cx, pb_cy, pb_Rmaj_pix, pb_nx, pb_ny,
+                                          factor=zoom_factor, fixed_au=fixed_au,
+                                          pix_as=pb_pix_as, distance_pc=distance_pc)
         pzd = pb_data[py0:py1, px0:px1]
         im1 = ax_obs.imshow(pzd, origin="lower", cmap=cmap,
                              norm=make_norm(pzd, vmin_pct=vmin_pct, vmax_pct=vmax_pct, log_scale=log_scale),
@@ -535,7 +663,9 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
                     bbox=dict(boxstyle="round,pad=0.4", facecolor="#111", edgecolor=edge, alpha=0.88))
 
         # -- Panel 2: Residual ----------------------------------------------------
-        rx0, rx1, ry0, ry1 = zoom_bounds(res_cx, res_cy, res_Rmaj_pix, res_nx, res_ny, factor=zoom_factor)
+        rx0, rx1, ry0, ry1 = zoom_bounds(res_cx, res_cy, res_Rmaj_pix, res_nx, res_ny,
+                                          factor=zoom_factor, fixed_au=fixed_au,
+                                          pix_as=res_pix_as, distance_pc=distance_pc)
         rzd = res_data[ry0:ry1, rx0:rx1]
         im2 = ax_res.imshow(rzd, origin="lower", cmap="RdBu_r", norm=make_residual_norm(rzd),
                              extent=[rx0, rx1, ry0, ry1])
@@ -560,7 +690,7 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
         saved_path = savefig
     elif save and out_dir:
         os.makedirs(out_dir, exist_ok=True)
-        out_fname = f"stack_{snapshots[0]}_{snapshots[-1]}_{field}_axis{axis}.png"
+        out_fname = f"stack_{snapshots[0]}_{snapshots[-1]}_{field}_axis{axis}{suffix}.png"
         saved_path = os.path.join(out_dir, out_fname)
         fig.savefig(saved_path, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
     if show:
