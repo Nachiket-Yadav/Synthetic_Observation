@@ -60,6 +60,17 @@ def get_pixel_scale_arcsec(header):
     raise ValueError("Cannot determine pixel scale.")
 
 
+def skymodel_half_width_au(nx, pix_as, distance_pc):
+    """Physical half-width (AU) of a square skymodel frame: half of nx across.
+
+    Used to crop the pbcor / residual panels -- which are drawn on the larger
+    tclean frame (e.g. 100 px x 0.03" = 1200 AU for a 687.5 AU model) -- down
+    to the skymodel's own footprint, so the panels don't show tclean's empty
+    padding around the model.
+    """
+    return (nx / 2.0) * pix_as * distance_pc
+
+
 def make_norm(data, vmin_pct=0, vmax_pct=99.5, log_scale=False):
     """Clip to positive values, return a LogNorm or plain Normalize."""
     d = np.where(data > 0, data, np.nan)
@@ -156,7 +167,7 @@ def add_colorbar(fig, im, ax, label):
 # ---------------------------------------------------------------------------
 def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
                      skymodel_dir, residual_dir, zoom_factor=4, cmap="jet",
-                     suffix="", fixed_au=None,
+                     suffix="", fixed_au=None, crop_to_skymodel=True,
                      sky_norm=None, obs_norm=None, res_norm=None,
                      title_prefix=None):
     """Render one row of [skymodel | pbcor | residual] panels into the given axes.
@@ -225,6 +236,13 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
     sky_ny, sky_nx = sky_data.shape
     sky_pix_as = get_pixel_scale_arcsec(sky_hdr)
     sky_cx, sky_cy = sky_nx / 2.0, sky_ny / 2.0
+
+    # Default the zoom to the skymodel's own footprint so the pbcor / residual
+    # panels (drawn on the larger tclean frame) are cropped down to the model
+    # size instead of showing tclean's empty border. An explicit fixed_au
+    # (e.g. from plot_thin_vs_skirt's --fixed-au) still overrides this.
+    if fixed_au is None and crop_to_skymodel:
+        fixed_au = skymodel_half_width_au(sky_nx, sky_pix_as, distance_pc)
 
     # -- Load residual ---------------------------------------------------------
     res_fname = f"ALMA_snapshot_{snapshot}_axis_{axis}_{field}_sim_observed_pbcor{suffix}_residual.fits"
@@ -372,7 +390,7 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
 def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
                       zoom_factor=4, cmap="jet", dpi=130,
                       save=True, out_dir="figures", savefig=None, show=False,
-                      suffix="", fixed_au=None):
+                      suffix="", fixed_au=None, crop_to_skymodel=True):
     """Render one row of three zoomed panels for a single fitted disk.
 
       [0] Skymodel (zoomed)
@@ -417,7 +435,8 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
 
     info = render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
                             skymodel_dir, residual_dir, zoom_factor=zoom_factor,
-                            cmap=cmap, suffix=suffix, fixed_au=fixed_au)
+                            cmap=cmap, suffix=suffix, fixed_au=fixed_au,
+                            crop_to_skymodel=crop_to_skymodel)
     if info is None:
         plt.close(fig)
         return None
@@ -450,7 +469,8 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
 def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_dir, residual_dir,
                             zoom_factor=3, cmap="jet", vmin_pct=0, vmax_pct=99.5, log_scale=False,
                             dpi=130, save=True, out_dir="figures", savefig=None, show=False,
-                            mass_dict=None, df=None, suffix="", fixed_au=None):
+                            mass_dict=None, df=None, suffix="", fixed_au=None,
+                            crop_to_skymodel=True):
     """Stack multiple snapshots as rows of three zoomed panels each:
 
       [0] Skymodel (zoomed)
@@ -534,6 +554,12 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
         sky_pix_as = get_pixel_scale_arcsec(sky_hdr)
         sky_cx, sky_cy = sky_nx / 2.0, sky_ny / 2.0
 
+        # Crop all three panels to the skymodel footprint by default (see
+        # render_disk_row). Per-row local so an explicit fixed_au still wins.
+        eff_fixed_au = fixed_au
+        if eff_fixed_au is None and crop_to_skymodel:
+            eff_fixed_au = skymodel_half_width_au(sky_nx, sky_pix_as, distance_pc)
+
         # -- Load residual -------------------------------------------------------
         res_fname = f"ALMA_snapshot_{snapshot}_axis_{axis}_{field}_sim_observed_pbcor{suffix}_residual.fits"
         res_fpath = os.path.join(residual_dir, res_fname)
@@ -599,7 +625,7 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
 
         # -- Panel 0: Skymodel ----------------------------------------------------
         sx0, sx1, sy0, sy1 = zoom_bounds(sky_cx, sky_cy, sk_Rmaj_pix, sky_nx, sky_ny,
-                                          factor=zoom_factor, fixed_au=fixed_au,
+                                          factor=zoom_factor, fixed_au=eff_fixed_au,
                                           pix_as=sky_pix_as, distance_pc=distance_pc)
         szd = sky_data[sy0:sy1, sx0:sx1]
         im0 = ax_sky.imshow(szd, origin="lower", cmap=cmap,
@@ -619,7 +645,7 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
 
         # -- Panel 1: CASA pbcor ---------------------------------------------------
         px0, px1, py0, py1 = zoom_bounds(pb_cx, pb_cy, pb_Rmaj_pix, pb_nx, pb_ny,
-                                          factor=zoom_factor, fixed_au=fixed_au,
+                                          factor=zoom_factor, fixed_au=eff_fixed_au,
                                           pix_as=pb_pix_as, distance_pc=distance_pc)
         pzd = pb_data[py0:py1, px0:px1]
         im1 = ax_obs.imshow(pzd, origin="lower", cmap=cmap,
@@ -664,7 +690,7 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
 
         # -- Panel 2: Residual ----------------------------------------------------
         rx0, rx1, ry0, ry1 = zoom_bounds(res_cx, res_cy, res_Rmaj_pix, res_nx, res_ny,
-                                          factor=zoom_factor, fixed_au=fixed_au,
+                                          factor=zoom_factor, fixed_au=eff_fixed_au,
                                           pix_as=res_pix_as, distance_pc=distance_pc)
         rzd = res_data[ry0:ry1, rx0:rx1]
         im2 = ax_res.imshow(rzd, origin="lower", cmap="RdBu_r", norm=make_residual_norm(rzd),
