@@ -458,8 +458,15 @@ def main(argv: List[str] | None = None) -> None:
     print(f"Processing {len(paths)} snapshot(s) with telescope={cfg.telescope}, "
           f"resolution={cfg.resolution}")
 
-    total = 0
+    # Load any existing luminosities so this run updates them in place
+    # instead of clobbering entries from previous runs (e.g. other snapshots
+    # or telescopes processed earlier).
     luminosities = {}
+    if os.path.exists(args.luminosity_file):
+        with open(args.luminosity_file) as f:
+            luminosities = json.load(f)
+
+    total = 0
     for path in paths:
         snapshot_id, lum_lsun, written = process_snapshot(path, cfg, args.output_dir)
         luminosities[snapshot_id] = lum_lsun

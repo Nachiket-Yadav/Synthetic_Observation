@@ -1,4 +1,5 @@
 *.fits
 *.hdf5
+*.png
 __pycache__/
 *.pyc
