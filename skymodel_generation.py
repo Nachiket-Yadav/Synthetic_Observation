@@ -33,9 +33,11 @@ Process every snapshot in a directory and write FITS files to ./skymodels:
 
     python skymodel_generation.py --input-dir /path/to/snapshots --output-dir skymodels
 
-Process a specific list of snapshots:
+Process a specific list of snapshots. Each filename just needs a
+``snapshot_<number>`` token somewhere in it -- extra prefixes/suffixes
+(e.g. a run name) are fine and are ignored for naming purposes:
 
-    python skymodel_generation.py --snapshots snap_170.hdf5 snap_171.hdf5 -o skymodels
+    python skymodel_generation.py --snapshots run1_snapshot_170_v2.hdf5 snapshot_171.hdf5 -o skymodels
 
 Use the VLA configuration instead of ALMA:
 
@@ -50,6 +52,7 @@ import argparse
 import glob
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -196,14 +199,45 @@ def _register_dust_fields(ds, cfg: Config) -> None:
 # ---------------------------------------------------------------------------
 # Snapshot loading
 # ---------------------------------------------------------------------------
+# Matches the ``snapshot_<number>`` token anywhere in a filename, e.g. both
+# "snapshot_170.hdf5" and a longer name like "run1_snapshot_170_v2.hdf5"
+# yield "snapshot_170". This is the canonical stem used for all naming from
+# here on (FITS output filenames, luminosity JSON keys, log messages) -- the
+# file itself is still opened from its full, possibly longer, path.
+SNAPSHOT_NAME_RE = re.compile(r"snapshot_(\d+)")
+
+
+def _snapshot_name_from_path(path: str) -> str:
+    """Extract the canonical ``snapshot_<number>`` token from a filepath.
+
+    Any prefix/suffix around the token is ignored for naming purposes (e.g.
+    ``sim1_snapshot_170_v2.hdf5`` -> ``"snapshot_170"``), but ``path`` itself
+    is untouched so the longer, original filename is still what gets read.
+    """
+    stem = os.path.splitext(os.path.basename(path))[0]
+    match = SNAPSHOT_NAME_RE.search(stem)
+    if not match:
+        raise ValueError(
+            f"Could not find a 'snapshot_<number>' token in filename {stem!r} "
+            f"(from {path!r}); expected e.g. 'snapshot_170' to appear "
+            "somewhere in the name."
+        )
+    return match.group(0)
+
+
 def _load_snapshot(path: str):
     """Open a snapshot and return ``(ds, ad, box_size_pc, snapshot_name)``.
 
     The unit base is read from the snapshot header so that the loader works
     regardless of the code-unit conventions in a given run. ``UnitB`` is set
     to a fixed 1e4 because some snapshots do not store a magnetic-field unit.
+
+    ``snapshot_name`` is the canonical ``snapshot_<number>`` token parsed out
+    of ``path`` (see ``_snapshot_name_from_path``), not the raw filename stem
+    -- so a longer filename like ``run1_snapshot_170_v2.hdf5`` is still read
+    correctly, but everything downstream is named ``snapshot_170``.
     """
-    snapshot_name = os.path.splitext(os.path.basename(path))[0]
+    snapshot_name = _snapshot_name_from_path(path)
 
     with h5py.File(path, "r") as f:
         header = f["Header"].attrs
@@ -224,9 +258,10 @@ def _load_snapshot(path: str):
 def _snapshot_id(snapshot_name: str) -> str:
     """Return the bare snapshot ID used as a key in the results JSON files.
 
-    The sky-model filename stem is e.g. ``snapshot_170``; downstream
-    (``analysis.py``) keys ``fitting_results.json`` by the trailing numeric ID
-    ``170``. We key the luminosity file the same way so the two line up.
+    ``snapshot_name`` is the canonical ``snapshot_170``-style token produced
+    by ``_snapshot_name_from_path``; downstream (``analysis.py``) keys
+    ``fitting_results.json`` by the bare numeric ID ``170``. We key the
+    luminosity file the same way so the two line up.
     """
     return snapshot_name.split("_")[-1]
 

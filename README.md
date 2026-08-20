@@ -76,8 +76,11 @@ Common options:
 # Process a whole directory
 python skymodel_generation.py -i ./data -o skymodels
 
-# Process specific snapshots instead of a whole directory
-python skymodel_generation.py --snapshots snap_170.hdf5 snap_171.hdf5 -o skymodels
+# Process specific snapshots instead of a whole directory. Each filename just
+# needs a `snapshot_<number>` token in it somewhere -- extra prefixes/suffixes
+# (e.g. a run name) are ignored for naming purposes, so longer filenames like
+# `run1_snapshot_170_v2.hdf5` work too and are still named `snapshot_170`.
+python skymodel_generation.py --snapshots run1_snapshot_170_v2.hdf5 snapshot_171.hdf5 -o skymodels
 
 # only snapshots 170-179
 python skymodel_generation.py -i ./data --glob "snapshot_17*.hdf5" -o skymodels
