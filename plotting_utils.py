@@ -91,7 +91,7 @@ def make_residual_norm(data):
 
 
 def zoom_bounds(cx, cy, Rmaj_pix, nx, ny, factor=4,
-                 fixed_au=None, pix_as=None, distance_pc=400.0):
+                 fixed_au=None, pix_as=None, distance_pc=400.0, cap_au=None):
     """Pixel bounds for a zoomed cutout.
 
     fixed_au : fixed PHYSICAL half-width in AU, identical across panels and
@@ -102,11 +102,23 @@ def zoom_bounds(cx, cy, Rmaj_pix, nx, ny, factor=4,
         scale-dependent (e.g. 26 AU on a 0.86 AU/pix skymodel vs. 360 AU on
         a 12 AU/pix pbcor image of the same disk) -- fine within one image,
         not comparable across images of different pixel scale.
+    cap_au : optional PHYSICAL half-width CAP in AU applied ONLY to the
+        factor*Rmaj path. The view can zoom in below the cap (zoom_factor
+        still works) but is never wider than cap_au -- this is what keeps the
+        pbcor/residual panels from showing tclean's empty border past the
+        skymodel footprint. Ignored when fixed_au is given (fixed_au is
+        already an explicit absolute half-width).
     """
     if fixed_au is not None and pix_as is not None:
         r = int(round(fixed_au / (pix_as * distance_pc)))
     else:
-        r = max(int(Rmaj_pix * factor), 30)
+        # Small pixel guard only (was 30, which is ~360 AU on a 12 AU/pix pbcor
+        # -- larger than the whole model footprint, so it pinned the pbcor view
+        # and made zoom_factor a no-op while also desyncing panel scales). A
+        # small floor keeps factor*Rmaj physically consistent across panels.
+        r = max(int(Rmaj_pix * factor), 5)
+        if cap_au is not None and pix_as is not None:
+            r = min(r, int(round(cap_au / (pix_as * distance_pc))))
     return (
         max(int(cx) - r, 0), min(int(cx) + r, nx),
         max(int(cy) - r, 0), min(int(cy) + r, ny),
@@ -169,7 +181,7 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
                      skymodel_dir, residual_dir, zoom_factor=4, cmap="jet",
                      suffix="", fixed_au=None, crop_to_skymodel=True,
                      sky_norm=None, obs_norm=None, res_norm=None,
-                     title_prefix=None):
+                     title_prefix=None, show_legend=True, show_info_box=True):
     """Render one row of [skymodel | pbcor | residual] panels into the given axes.
 
     This is the single rendering code path shared by ``plot_three_panel``
@@ -198,6 +210,11 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
                               row's data (for cross-row comparability).
     title_prefix            : str or None -- prefixed to panel titles and the
                               annotation box, e.g. "THIN" / "SKIRT".
+    show_legend             : bool -- whether to draw the per-panel legends
+                              (ellipse fit label). Default True.
+    show_info_box           : bool -- whether to draw the overlaid text box
+                              of fit parameters (Rmaj/Rmin/PA/flux/etc.) on
+                              the CASA observation panel. Default True.
 
     Returns
     -------
@@ -237,12 +254,13 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
     sky_pix_as = get_pixel_scale_arcsec(sky_hdr)
     sky_cx, sky_cy = sky_nx / 2.0, sky_ny / 2.0
 
-    # Default the zoom to the skymodel's own footprint so the pbcor / residual
-    # panels (drawn on the larger tclean frame) are cropped down to the model
-    # size instead of showing tclean's empty border. An explicit fixed_au
-    # (e.g. from plot_thin_vs_skirt's --fixed-au) still overrides this.
+    # Cap the zoom at the skymodel's own footprint so the pbcor / residual
+    # panels (drawn on the larger tclean frame) never show tclean's empty
+    # border. Unlike setting fixed_au, this is only an upper bound -- zoom_factor
+    # still zooms IN below it. An explicit fixed_au overrides both.
+    cap_au = None
     if fixed_au is None and crop_to_skymodel:
-        fixed_au = skymodel_half_width_au(sky_nx, sky_pix_as, distance_pc)
+        cap_au = skymodel_half_width_au(sky_nx, sky_pix_as, distance_pc)
 
     # -- Load residual ---------------------------------------------------------
     res_fname = f"ALMA_snapshot_{snapshot}_axis_{axis}_{field}_sim_observed_pbcor{suffix}_residual.fits"
@@ -290,13 +308,19 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
         res_Rmaj_pix = res_nx * 0.1
         mpl_angle = 0
 
-    zoom_label = f"±{fixed_au:.0f} AU" if fixed_au is not None else f"±{zoom_factor:.2f} x Rmaj"
+    if fixed_au is not None:
+        zoom_label = f"±{fixed_au:.0f} AU"
+    elif cap_au is not None:
+        zoom_label = f"±{zoom_factor:.2f} x Rmaj (cap ±{cap_au:.0f} AU)"
+    else:
+        zoom_label = f"±{zoom_factor:.2f} x Rmaj"
     prefix = f"{title_prefix} " if title_prefix else ""
 
     # Panel 0: Skymodel zoomed
     sx0, sx1, sy0, sy1 = zoom_bounds(sky_cx, sky_cy, sk_Rmaj_pix, sky_nx, sky_ny,
                                       factor=zoom_factor, fixed_au=fixed_au,
-                                      pix_as=sky_pix_as, distance_pc=distance_pc)
+                                      pix_as=sky_pix_as, distance_pc=distance_pc,
+                                      cap_au=cap_au)
     szd = sky_data[sy0:sy1, sx0:sx1]
     used_sky_norm = sky_norm if sky_norm is not None else make_norm(szd)
     im0 = ax_sky.imshow(szd, origin="lower", cmap=cmap, norm=used_sky_norm, extent=[sx0, sx1, sy0, sy1])
@@ -310,13 +334,15 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
     ax_sky.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color="white")
     ax_sky.set_ylabel("ΔDec (AU)", color="white")
     ax_sky.set_title(f"{prefix}Skymodel  -- zoomed ({zoom_label})", color="white")
-    ax_sky.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white", fontsize=6)
+    if show_legend:
+        ax_sky.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white", fontsize=6)
     add_colorbar(fig, im0, ax_sky, sky_hdr.get("BUNIT", "Jy/pixel"))
 
     # Panel 1: CASA pbcor zoomed
     px0, px1, py0, py1 = zoom_bounds(pb_cx, pb_cy, pb_Rmaj_pix, pb_nx, pb_ny,
                                       factor=zoom_factor, fixed_au=fixed_au,
-                                      pix_as=pb_pix_as, distance_pc=distance_pc)
+                                      pix_as=pb_pix_as, distance_pc=distance_pc,
+                                      cap_au=cap_au)
     pzd = pb_data[py0:py1, px0:px1]
     used_obs_norm = obs_norm if obs_norm is not None else make_norm(pzd)
     im1 = ax_obs.imshow(pzd, origin="lower", cmap=cmap, norm=used_obs_norm, extent=[px0, px1, py0, py1])
@@ -330,11 +356,14 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
     ax_obs.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color="white")
     ax_obs.set_ylabel("ΔDec (AU)", color="white")
     ax_obs.set_title(f"{prefix}CASA Observation  -- zoomed ({zoom_label})", color="white")
-    ax_obs.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white")
+    if show_legend:
+        ax_obs.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white")
     add_colorbar(fig, im1, ax_obs, pb_hdr.get("BUNIT", "Jy/beam"))
 
     header_line = f"{title_prefix}\n" if title_prefix else ""
-    if fit_valid:
+    if not show_info_box:
+        pass
+    elif fit_valid:
         info = (
             header_line +
             f"snap {snapshot}  |  {field}  |  axis {axis}\n"
@@ -358,7 +387,8 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
     # Panel 2: Residual zoomed
     rx0, rx1, ry0, ry1 = zoom_bounds(res_cx, res_cy, res_Rmaj_pix, res_nx, res_ny,
                                       factor=zoom_factor, fixed_au=fixed_au,
-                                      pix_as=res_pix_as, distance_pc=distance_pc)
+                                      pix_as=res_pix_as, distance_pc=distance_pc,
+                                      cap_au=cap_au)
     rzd = res_data[ry0:ry1, rx0:rx1]
     used_res_norm = res_norm if res_norm is not None else make_residual_norm(rzd)
     im2 = ax_res.imshow(rzd, origin="lower", cmap="RdBu_r", norm=used_res_norm, extent=[rx0, rx1, ry0, ry1])
@@ -372,7 +402,8 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
     ax_res.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color="white")
     ax_res.set_ylabel("ΔDec (AU)", color="white")
     ax_res.set_title(f"{prefix}imfit Residual  -- zoomed ({zoom_label})", color="white")
-    ax_res.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white", fontsize=6)
+    if show_legend:
+        ax_res.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white", fontsize=6)
     add_colorbar(fig, im2, ax_res, "Jy/beam  (obs - model)")
 
     return {
@@ -390,7 +421,8 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
 def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
                       zoom_factor=4, cmap="jet", dpi=130,
                       save=True, out_dir="figures", savefig=None, show=False,
-                      suffix="", fixed_au=None, crop_to_skymodel=True):
+                      suffix="", fixed_au=None, crop_to_skymodel=True,
+                      show_legend=True, show_info_box=True):
     """Render one row of three zoomed panels for a single fitted disk.
 
       [0] Skymodel (zoomed)
@@ -421,6 +453,9 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
     fixed_au      : float or None -- fixed physical zoom half-width in AU
                     shared by all three panels (see ``zoom_bounds``).
                     Default None preserves the original Rmaj-relative zoom.
+    show_legend   : bool -- whether to draw the per-panel legends. Default True.
+    show_info_box : bool -- whether to draw the overlaid fit-parameter text
+                    box on the CASA observation panel. Default True.
 
     Returns
     -------
@@ -436,7 +471,8 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
     info = render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
                             skymodel_dir, residual_dir, zoom_factor=zoom_factor,
                             cmap=cmap, suffix=suffix, fixed_au=fixed_au,
-                            crop_to_skymodel=crop_to_skymodel)
+                            crop_to_skymodel=crop_to_skymodel, show_legend=show_legend,
+                            show_info_box=show_info_box)
     if info is None:
         plt.close(fig)
         return None
@@ -556,9 +592,11 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
 
         # Crop all three panels to the skymodel footprint by default (see
         # render_disk_row). Per-row local so an explicit fixed_au still wins.
-        eff_fixed_au = fixed_au
-        if eff_fixed_au is None and crop_to_skymodel:
-            eff_fixed_au = skymodel_half_width_au(sky_nx, sky_pix_as, distance_pc)
+        # Cap the zoom at the skymodel footprint (see render_disk_row); an
+        # upper bound only, so zoom_factor still zooms in. Explicit fixed_au wins.
+        cap_au = None
+        if fixed_au is None and crop_to_skymodel:
+            cap_au = skymodel_half_width_au(sky_nx, sky_pix_as, distance_pc)
 
         # -- Load residual -------------------------------------------------------
         res_fname = f"ALMA_snapshot_{snapshot}_axis_{axis}_{field}_sim_observed_pbcor{suffix}_residual.fits"
@@ -625,7 +663,7 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
 
         # -- Panel 0: Skymodel ----------------------------------------------------
         sx0, sx1, sy0, sy1 = zoom_bounds(sky_cx, sky_cy, sk_Rmaj_pix, sky_nx, sky_ny,
-                                          factor=zoom_factor, fixed_au=eff_fixed_au,
+                                          factor=zoom_factor, fixed_au=fixed_au, cap_au=cap_au,
                                           pix_as=sky_pix_as, distance_pc=distance_pc)
         szd = sky_data[sy0:sy1, sx0:sx1]
         im0 = ax_sky.imshow(szd, origin="lower", cmap=cmap,
@@ -645,7 +683,7 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
 
         # -- Panel 1: CASA pbcor ---------------------------------------------------
         px0, px1, py0, py1 = zoom_bounds(pb_cx, pb_cy, pb_Rmaj_pix, pb_nx, pb_ny,
-                                          factor=zoom_factor, fixed_au=eff_fixed_au,
+                                          factor=zoom_factor, fixed_au=fixed_au, cap_au=cap_au,
                                           pix_as=pb_pix_as, distance_pc=distance_pc)
         pzd = pb_data[py0:py1, px0:px1]
         im1 = ax_obs.imshow(pzd, origin="lower", cmap=cmap,
@@ -690,7 +728,7 @@ def plot_three_panel_stack(snapshots, field, axis, results, pbcor_dir, skymodel_
 
         # -- Panel 2: Residual ----------------------------------------------------
         rx0, rx1, ry0, ry1 = zoom_bounds(res_cx, res_cy, res_Rmaj_pix, res_nx, res_ny,
-                                          factor=zoom_factor, fixed_au=eff_fixed_au,
+                                          factor=zoom_factor, fixed_au=fixed_au, cap_au=cap_au,
                                           pix_as=res_pix_as, distance_pc=distance_pc)
         rzd = res_data[ry0:ry1, rx0:rx1]
         im2 = ax_res.imshow(rzd, origin="lower", cmap="RdBu_r", norm=make_residual_norm(rzd),

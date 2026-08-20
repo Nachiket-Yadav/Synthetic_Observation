@@ -112,7 +112,7 @@ class Config:
 
     telescope: str = "ALMA"
     resolution: tuple = (800, 800)
-    zoom_base: float = 30.0
+    zoom_base: float = 100.0
     number_density_threshold: float = 1e8
     dust_to_gas: float = 0.01
     region_distances_pc: Dict[str, float] = field(
@@ -338,7 +338,7 @@ def process_snapshot(path: str, cfg: Config, out_dir: str):
             prj.set_center((cen[0], cen[1]))
 
         # Zoom: scale with box size for large boxes, fixed otherwise.
-        zoom = cfg.zoom_base * box_size_pc if box_size_pc > 0.1 else cfg.zoom_base
+        zoom = 400.0 if box_size_pc > 0.1 else cfg.zoom_base
         prj.zoom(zoom)
 
         # Fixed-resolution buffer -> numpy array of projected emissivity.
