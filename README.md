@@ -52,6 +52,7 @@ The workflow has four stages:
 | `casa_simulation_skirt.py` | SKIRT-variant counterpart to `casa_simulation.py` -- same `simobserve`/`tclean`/`impbcor`/`exportfits` pipeline, byte-identical observing parameters, run on SKIRT sky models instead. | Inside CASA |
 | `analysis_skirt.py` | SKIRT-variant counterpart to `analysis.py`. Writes to `fitting_results_skirt.json` instead of `fitting_results.json`. | Inside CASA |
 | `plot_thin_vs_skirt.py` | Two-row QA figure comparing the thin and SKIRT pipelines for one snapshot/region/axis at a shared physical zoom. | Plain Python |
+| `plot_gallery.py` | Paper-quality gallery figures for a manuscript: one row per snapshot, one column per projection axis (x/y/z), white background, AASTeX-scale fonts. Supports `--variant {thin,skirt}`. | Plain Python |
 
 ---
 
@@ -204,6 +205,53 @@ masses); see its use in `plot_three_panel.ipynb`.
 
 ---
 
+## Stage 5 — Paper-quality gallery figures
+
+```bash
+python plot_gallery.py
+```
+
+With no arguments this writes 8 PNGs to `gallery_figures/`: for both
+`skymodel` (stage-1 input) and `pbcor` (stage-2 CASA observation), for both
+`Orion` and `Perseus`, in both `scaled` and `unscaled` colour variants. Rows
+are the snapshots currently under investigation (169, 171, 106, 307, 417,
+319, 320, 323, 346), columns are the x/y/z projection axes. Every panel in
+one gallery is cropped to the same shared physical field of view -- sized
+from the largest fitted `Rmaj` in `fitting_results.json` -- so disk sizes
+are directly comparable across the grid. `unscaled` gives each panel its own
+colour norm and colorbar; `scaled` shares one colour norm (and one colorbar)
+taken from the brightest snapshot/axis in the gallery, so the fainter disks
+read as visibly fainter rather than each being auto-stretched to fill its
+own panel.
+
+Unlike the dark-themed QA figures above, these are white-background,
+black-text, serif-font figures sized for direct manuscript use (AASTeX
+two-column text width and body-text font size by default). Restrict or
+customize a run, e.g. just the Orion skymodel gallery:
+
+```bash
+python plot_gallery.py --snapshots 169 171 346 --fields Orion \
+    --kinds skymodel --out-dir gallery_figures
+```
+
+Once SKIRT sky models/observations exist for these snapshots, add
+`--variant skirt` to make the same eight galleries from the SKIRT pipeline
+instead (reads `*_SKIRT` files and `fitting_results_skirt.json` by default).
+Run `python plot_gallery.py --help` for the full list of options.
+
+**A large `Rmaj` is not automatically treated as a bad fit.** The shared
+FOV is sized off the *largest* fitted `Rmaj` in the gallery, and a
+disk/envelope can legitimately be far more extended than the rest of the
+set (checked by eye against its own skymodel/pbcor image, not inferred from
+fit-quality stats -- a spurious fit and a real extended structure have
+shown up with equally good S/N and residual fraction in this pipeline). If
+one snapshot really is a fit failure, leave it out of the FOV sizing with
+`--rmaj-exclude <snapshot>:<axis>` (its own panel still renders, just
+cropped to whatever FOV the rest of the gallery ends up with) rather than
+relying on an automatic outlier filter.
+
+---
+
 ## SKIRT variant
 
 Stage 1 has a second, independent path: **SKIRT** Monte Carlo radiative-transfer
@@ -300,6 +348,7 @@ physical scale instead of the default Rmaj-relative zoom.
 | `fitting_results.json` | Stage 3 (`analysis.py`) | Thin fitted properties + predicted dust masses |
 | `fitting_results_skirt.json` | Stage 3 (`analysis_skirt.py`) | SKIRT fitted properties + predicted dust masses, same schema, kept separate |
 | `figures/` | Stage 4 | Three-panel QA PNGs (thin, SKIRT, and thin-vs-SKIRT comparison) |
+| `gallery_figures/` | Stage 5 (`plot_gallery.py`) | White-background, manuscript-ready gallery PNGs (thin and, once available, SKIRT) |
 
 ---
 

@@ -35,6 +35,7 @@ place.
 
 import os
 import glob
+import math
 import argparse
 
 
@@ -58,7 +59,13 @@ OBS_SETTINGS = {
     "deconvolver": "hogbom",
     "stokes": "I",
 
-    # imsize selection: large image if the model pixel is coarse, else small.
+    # imsize selection: compute an imsize that covers the model's full angular
+    # footprint at the imaging cell size (see simulate_one). Set
+    # match_imsize_to_model=False to fall back to the old two-bin heuristic
+    # below (npix_coarse/npix_fine/incell_threshold_arcsec).
+    "match_imsize_to_model": True,
+    "imsize_min": 100,
+    "imsize_max": 2048,
     "npix_coarse": 720,                             # used when incell > 0.01 arcsec
     "npix_fine": 100,                               # used otherwise
     "incell_threshold_arcsec": 0.01,
@@ -92,13 +99,23 @@ def simulate_one(skymodel_path, out_dir, settings):
     inbright = hdr["datamax"]                       # peak brightness in the model
     imgmin = hdr["datamin"]                         # used as the clean threshold
     incell = hdr["cdelt1"] * 3600.0                 # model cell size in arcsec
+    n_model_pix = hdr["shape"][0]                   # NAXIS1 of the sky model
 
-    # Choose output image size based on how finely the model is sampled.
-    if incell > settings["incell_threshold_arcsec"]:
+    # Choose the output imsize so the tclean image covers the model's full
+    # angular footprint at the imaging cell size, instead of a fixed pixel
+    # count that only happens to match the footprint for some models.
+    model_fov_arcsec = n_model_pix * incell
+    if settings["match_imsize_to_model"]:
+        npix = int(math.ceil(model_fov_arcsec / settings["cell_tclean_arcsec"]))
+        if npix % 2 != 0:
+            npix += 1                               # tclean/FFT prefer even sizes
+        npix = min(max(npix, settings["imsize_min"]), settings["imsize_max"])
+    elif incell > settings["incell_threshold_arcsec"]:
         npix = settings["npix_coarse"]
     else:
         npix = settings["npix_fine"]
     imsize = [npix, npix]
+    output_fov_arcsec = npix * settings["cell_tclean_arcsec"]
 
     antennalist = settings["antennalist"]
     project_name = "%s_snapshot_%s_axis_%s_%s" % (telescope, snapshot, axis, site)
@@ -108,7 +125,8 @@ def simulate_one(skymodel_path, out_dir, settings):
     print("  model        :", skymodel_path)
     print("  inbright     :", inbright)
     print("  incell       : %.6f arcsec" % incell)
-    print("  imsize       :", imsize)
+    print("  model FoV    : %.6f arcsec (%d px)" % (model_fov_arcsec, n_model_pix))
+    print("  imsize       :", imsize, "-> output FoV: %.6f arcsec" % output_fov_arcsec)
 
     # 1) Simulate the observation.
     simobserve(

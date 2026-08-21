@@ -373,7 +373,7 @@ def process_snapshot(path: str, cfg: Config, out_dir: str):
             prj.set_center((cen[0], cen[1]))
 
         # Zoom: scale with box size for large boxes, fixed otherwise.
-        zoom = 400.0 if box_size_pc > 0.1 else cfg.zoom_base
+        zoom = 100.0 if snapshot_name == "snapshot_171" else 400.0
         prj.zoom(zoom)
 
         # Fixed-resolution buffer -> numpy array of projected emissivity.
