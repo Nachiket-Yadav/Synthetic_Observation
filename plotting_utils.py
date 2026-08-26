@@ -21,6 +21,7 @@ is what lets both variants share one rendering code path.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import warnings
 
@@ -92,7 +93,17 @@ def make_norm(data, vmin_pct=0, vmax_pct=99.5, log_scale=False):
 def make_residual_norm(data):
     """Symmetric diverging norm centred on zero for residual images."""
     vmax = np.nanmax(np.abs(data))
-    vmax = max(vmax, 1e-10)  # avoid zero-range norm
+    # Floor for the zero-range case (e.g. an all-zero residual FITS written
+    # when analysis.py's imfit failed -- no model to subtract, so nothing to
+    # show here). Needs to be well above ~1e-9: at that scale, a norm this
+    # narrow paired with the (non-contiguous, float32) FITS data slice hits a
+    # Matplotlib/Agg rendering edge case that paints the whole panel solid
+    # colormap-extreme instead of the flat/near-zero colour the data actually
+    # calls for -- reproduced independent of whether the residual is actually
+    # all-zero, just from norm width alone. 1e-4 Jy/beam is safely below any
+    # real residual signal in this pipeline (~1e-3 to ~1e-1) and safely above
+    # that cliff.
+    vmax = max(vmax, 1e-4) if np.isfinite(vmax) else 1e-4
     return TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
 
 
@@ -212,7 +223,8 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
                      skymodel_dir, residual_dir, zoom_factor=4, cmap="jet",
                      suffix="", fixed_au=None, crop_to_skymodel=True,
                      sky_norm=None, obs_norm=None, res_norm=None,
-                     title_prefix=None, show_legend=True, show_info_box=True):
+                     title_prefix=None, show_legend=True, show_info_box=True,
+                     paper=False):
     """Render one row of [skymodel | pbcor | residual] panels into the given axes.
 
     This is the single rendering code path shared by ``plot_three_panel``
@@ -246,6 +258,17 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
     show_info_box           : bool -- whether to draw the overlaid text box
                               of fit parameters (Rmaj/Rmin/PA/flux/etc.) on
                               the CASA observation panel. Default True.
+    paper                    : bool -- False (default): the dark QA theme
+                              (near-black panels, white text, cyan/orange
+                              info-box accents). True: white panels, black
+                              serif text, light info box -- for dropping the
+                              same three-panel comparison straight into a
+                              manuscript. Caller is responsible for the
+                              matching figure-level styling (facecolor,
+                              ``style_ax`` vs ``style_ax_paper``, and
+                              wrapping in ``plt.rc_context(_paper_rc(...))``
+                              for the serif font/point size) -- this only
+                              controls the per-panel colours drawn here.
 
     Returns
     -------
@@ -253,6 +276,38 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
     norms actually used, fit validity), or None if a required file was
     missing (nothing was drawn).
     """
+    # -- Per-panel colour theme --------------------------------------------
+    if paper:
+        text_color = "black"
+        cross_color = "0.55"
+        cross_res_color = "0.55"
+        legend_kw = dict(fontsize=9, facecolor="white", edgecolor="black", labelcolor="black")
+        # Explicit (smaller-than-rc) fontsize here: this is a dense multi-line
+        # monospace dump, and at the base paper fontsize (11pt) its longest
+        # line runs past the panel edge into the colorbar at this figure's
+        # default width.
+        info_valid_kw = dict(color="black", fontsize=7,
+                              bbox=dict(boxstyle="round,pad=0.4", facecolor="#f5f5f5",
+                                        edgecolor="black", alpha=0.92))
+        info_fail_kw = dict(color="#a04b00", fontsize=7,
+                             bbox=dict(boxstyle="round,pad=0.4", facecolor="#f5f5f5",
+                                       edgecolor="#a04b00", alpha=0.92))
+        au_tick_color = "black"
+        colorbar_fn = lambda *a, **kw: add_colorbar_paper(*a, fontsize=9, **kw)
+    else:
+        text_color = "white"
+        cross_color = "white"
+        cross_res_color = "gray"
+        legend_kw = dict(fontsize=6, facecolor="#1a1a1a", edgecolor="#555", labelcolor="white")
+        info_valid_kw = dict(color="white",
+                              bbox=dict(boxstyle="round,pad=0.4", facecolor="#111",
+                                        edgecolor="cyan", alpha=0.88))
+        info_fail_kw = dict(color="orange",
+                             bbox=dict(boxstyle="round,pad=0.4", facecolor="#111",
+                                       edgecolor="orange", alpha=0.88))
+        au_tick_color = "white"
+        colorbar_fn = add_colorbar
+
     # -- Parse filename (variant-independent: snapshot/axis/field always sit
     #    at the same split() indices regardless of a trailing _SKIRT/suffix,
     #    since the suffix is appended after these fields in every filename). --
@@ -366,17 +421,17 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
     im0 = ax_sky.imshow(szd, origin="lower", cmap=cmap, norm=used_sky_norm, extent=[csx0, csx1, csy0, csy1])
     if fit_valid:
         draw_ellipse_on_ax(ax_sky, sky_cx, sky_cy, sk_Rmaj_pix, sk_Rmin_pix, mpl_angle)
-    ax_sky.axhline(sky_cy, color="white", lw=0.4, alpha=0.35)
-    ax_sky.axvline(sky_cx, color="white", lw=0.4, alpha=0.35)
+    ax_sky.axhline(sky_cy, color=cross_color, lw=0.4, alpha=0.35)
+    ax_sky.axvline(sky_cx, color=cross_color, lw=0.4, alpha=0.35)
     ax_sky.set_xlim(sx0, sx1)
     ax_sky.set_ylim(sy0, sy1)
-    add_AU_ticks(ax_sky, sky_cx, sky_cy, sx0, sx1, sy0, sy1, sky_pix_as, distance_pc)
-    ax_sky.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color="white")
-    ax_sky.set_ylabel("ΔDec (AU)", color="white")
-    ax_sky.set_title(f"{prefix}Skymodel  -- zoomed ({zoom_label})", color="white")
+    add_AU_ticks(ax_sky, sky_cx, sky_cy, sx0, sx1, sy0, sy1, sky_pix_as, distance_pc, label_color=au_tick_color)
+    ax_sky.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color=text_color)
+    ax_sky.set_ylabel("ΔDec (AU)", color=text_color)
+    ax_sky.set_title(f"{prefix}Skymodel  -- zoomed ({zoom_label})", color=text_color)
     if show_legend:
-        ax_sky.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white", fontsize=6)
-    add_colorbar(fig, im0, ax_sky, sky_hdr.get("BUNIT", "Jy/pixel"))
+        ax_sky.legend(loc="upper right", **legend_kw)
+    colorbar_fn(fig, im0, ax_sky, sky_hdr.get("BUNIT", "Jy/pixel"))
 
     # Panel 1: CASA pbcor zoomed
     px0, px1, py0, py1 = zoom_bounds(pb_cx, pb_cy, pb_Rmaj_pix, pb_nx, pb_ny,
@@ -389,17 +444,22 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
     im1 = ax_obs.imshow(pzd, origin="lower", cmap=cmap, norm=used_obs_norm, extent=[cpx0, cpx1, cpy0, cpy1])
     if fit_valid:
         draw_ellipse_on_ax(ax_obs, pb_cx, pb_cy, pb_Rmaj_pix, pb_Rmin_pix, mpl_angle)
-    ax_obs.axhline(pb_cy, color="white", lw=0.4, alpha=0.35)
-    ax_obs.axvline(pb_cx, color="white", lw=0.4, alpha=0.35)
+    ax_obs.axhline(pb_cy, color=cross_color, lw=0.4, alpha=0.35)
+    ax_obs.axvline(pb_cx, color=cross_color, lw=0.4, alpha=0.35)
     ax_obs.set_xlim(px0, px1)
     ax_obs.set_ylim(py0, py1)
-    add_AU_ticks(ax_obs, pb_cx, pb_cy, px0, px1, py0, py1, pb_pix_as, distance_pc)
-    ax_obs.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color="white")
-    ax_obs.set_ylabel("ΔDec (AU)", color="white")
-    ax_obs.set_title(f"{prefix}CASA Observation  -- zoomed ({zoom_label})", color="white")
+    add_AU_ticks(ax_obs, pb_cx, pb_cy, px0, px1, py0, py1, pb_pix_as, distance_pc, label_color=au_tick_color)
+    ax_obs.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color=text_color)
+    ax_obs.set_ylabel("ΔDec (AU)", color=text_color)
+    ax_obs.set_title(f"{prefix}CASA Observation  -- zoomed ({zoom_label})", color=text_color)
     if show_legend:
-        ax_obs.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white")
-    add_colorbar(fig, im1, ax_obs, pb_hdr.get("BUNIT", "Jy/beam"))
+        # The info box below spans the top of this panel -- push the legend
+        # to the bottom corner instead of stacking both in "upper right",
+        # which collide once the panel is narrower than the dark theme's
+        # (much wider) default canvas.
+        obs_legend_loc = "lower right" if (paper and show_info_box) else "upper right"
+        ax_obs.legend(loc=obs_legend_loc, **legend_kw)
+    colorbar_fn(fig, im1, ax_obs, pb_hdr.get("BUNIT", "Jy/beam"))
 
     header_line = f"{title_prefix}\n" if title_prefix else ""
     if not show_info_box:
@@ -418,12 +478,10 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
             f"peak residual = {peak_res:.3e} Jy  ({prf:.1%} of peak)"
         )
         ax_obs.text(0.02, 0.98, info, transform=ax_obs.transAxes, va="top", ha="left",
-                    color="white", family="monospace",
-                    bbox=dict(boxstyle="round,pad=0.4", facecolor="#111", edgecolor="cyan", alpha=0.88))
+                    family="monospace", **info_valid_kw)
     else:
         ax_obs.text(0.02, 0.98, header_line + f"snap {snapshot}  |  {field}  |  axis {axis}\nFit failed -- no Gaussian parameters",
-                    transform=ax_obs.transAxes, va="top", ha="left", color="orange", family="monospace",
-                    bbox=dict(boxstyle="round,pad=0.4", facecolor="#111", edgecolor="orange", alpha=0.88))
+                    transform=ax_obs.transAxes, va="top", ha="left", family="monospace", **info_fail_kw)
 
     # Panel 2: Residual zoomed
     rx0, rx1, ry0, ry1 = zoom_bounds(res_cx, res_cy, res_Rmaj_pix, res_nx, res_ny,
@@ -436,17 +494,17 @@ def render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
     im2 = ax_res.imshow(rzd, origin="lower", cmap="RdBu_r", norm=used_res_norm, extent=[crx0, crx1, cry0, cry1])
     if fit_valid:
         draw_ellipse_on_ax(ax_res, res_cx, res_cy, res_Rmaj_pix, res_Rmin_pix, mpl_angle, color="black", ls="--")
-    ax_res.axhline(res_cy, color="gray", lw=0.4, alpha=0.35)
-    ax_res.axvline(res_cx, color="gray", lw=0.4, alpha=0.35)
+    ax_res.axhline(res_cy, color=cross_res_color, lw=0.4, alpha=0.35)
+    ax_res.axvline(res_cx, color=cross_res_color, lw=0.4, alpha=0.35)
     ax_res.set_xlim(rx0, rx1)
     ax_res.set_ylim(ry0, ry1)
-    add_AU_ticks(ax_res, res_cx, res_cy, rx0, rx1, ry0, ry1, res_pix_as, distance_pc)
-    ax_res.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color="white")
-    ax_res.set_ylabel("ΔDec (AU)", color="white")
-    ax_res.set_title(f"{prefix}imfit Residual  -- zoomed ({zoom_label})", color="white")
+    add_AU_ticks(ax_res, res_cx, res_cy, rx0, rx1, ry0, ry1, res_pix_as, distance_pc, label_color=au_tick_color)
+    ax_res.set_xlabel(f"ΔRA (AU)  [d = {distance_pc} pc]", color=text_color)
+    ax_res.set_ylabel("ΔDec (AU)", color=text_color)
+    ax_res.set_title(f"{prefix}imfit Residual  -- zoomed ({zoom_label})", color=text_color)
     if show_legend:
-        ax_res.legend(loc="upper right", facecolor="#1a1a1a", edgecolor="#555", labelcolor="white", fontsize=6)
-    add_colorbar(fig, im2, ax_res, "Jy/beam  (obs - model)")
+        ax_res.legend(loc="upper right", **legend_kw)
+    colorbar_fn(fig, im2, ax_res, "Jy/beam  (obs - model)")
 
     return {
         "snapshot": snapshot, "field": field, "axis": axis,
@@ -464,7 +522,8 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
                       zoom_factor=4, cmap="jet", dpi=130,
                       save=True, out_dir="figures", savefig=None, show=False,
                       suffix="", fixed_au=None, crop_to_skymodel=True,
-                      show_legend=True, show_info_box=True):
+                      show_legend=True, show_info_box=True,
+                      paper=False, fig_width_in=16, row_height_in=4.2, fontsize=11):
     """Render one row of three zoomed panels for a single fitted disk.
 
       [0] Skymodel (zoomed)
@@ -498,43 +557,66 @@ def plot_three_panel(pbcor_fpath, fit, skymodel_dir, residual_dir,
     show_legend   : bool -- whether to draw the per-panel legends. Default True.
     show_info_box : bool -- whether to draw the overlaid fit-parameter text
                     box on the CASA observation panel. Default True.
+    paper         : bool -- False (default): the dark QA theme, sized at a
+                    fixed 24x6in regardless of ``fig_width_in``/``row_height_in``
+                    (unchanged from before this parameter existed). True:
+                    white background, black serif AASTeX-scale text -- same
+                    treatment as ``plot_gallery`` -- sized from
+                    ``fig_width_in``/``row_height_in`` so the on-page point
+                    size is correct once dropped into the manuscript at that
+                    width. Unlike the compact grid in ``plot_gallery``, this
+                    figure carries a per-panel colorbar and (optionally) a
+                    dense multi-line fit-parameter info box, so it does NOT
+                    default to AASTeX text-column width (7.1in) -- at that
+                    width the three panels/colorbars/info box collide and
+                    overlap. Default here (16 x 4.2in) keeps it legible; size
+                    it down explicitly (and/or pass ``show_info_box=False``)
+                    if you need it to actually fit in-column.
+    fig_width_in  : float -- figure width in inches when ``paper=True``
+                    (default: 16). Ignored when ``paper=False``.
+    row_height_in : float -- figure height in inches when ``paper=True``
+                    (default: 4.2). Ignored when ``paper=False``.
+    fontsize      : float -- base font size in points when ``paper=True``
+                    (default: 11). Ignored when ``paper=False``.
 
     Returns
     -------
     str or None -- the path the figure was saved to, or None if not saved.
     """
+    rc = plt.rc_context(_paper_rc(fontsize)) if paper else contextlib.nullcontext()
+    with rc:
+        figsize = (fig_width_in, row_height_in) if paper else (24, 6)
+        fig, axes = plt.subplots(1, 3, figsize=figsize, gridspec_kw={"wspace": 0.35})
+        fig.patch.set_facecolor("white" if paper else "#0d0d0d")
+        for ax in axes:
+            (style_ax_paper if paper else style_ax)(ax)
+        ax_sky, ax_obs, ax_res = axes
 
-    fig, axes = plt.subplots(1, 3, figsize=(24, 6), gridspec_kw={"wspace": 0.35})
-    fig.patch.set_facecolor("#0d0d0d")
-    for ax in axes:
-        style_ax(ax)
-    ax_sky, ax_obs, ax_res = axes
+        info = render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
+                                skymodel_dir, residual_dir, zoom_factor=zoom_factor,
+                                cmap=cmap, suffix=suffix, fixed_au=fixed_au,
+                                crop_to_skymodel=crop_to_skymodel, show_legend=show_legend,
+                                show_info_box=show_info_box, paper=paper)
+        if info is None:
+            plt.close(fig)
+            return None
+        snapshot, field, axis = info["snapshot"], info["field"], info["axis"]
 
-    info = render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
-                            skymodel_dir, residual_dir, zoom_factor=zoom_factor,
-                            cmap=cmap, suffix=suffix, fixed_au=fixed_au,
-                            crop_to_skymodel=crop_to_skymodel, show_legend=show_legend,
-                            show_info_box=show_info_box)
-    if info is None:
+        # -- Save ------------------------------------------------------------
+        plt.tight_layout()
+        saved_path = None
+        if savefig:
+            os.makedirs(os.path.dirname(savefig) or ".", exist_ok=True)
+            fig.savefig(savefig, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
+            saved_path = savefig
+        elif save and out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+            out_fname = f"snap{snapshot}_{field}_axis{axis}{suffix}_three_panel.png"
+            saved_path = os.path.join(out_dir, out_fname)
+            fig.savefig(saved_path, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
+        if show:
+            plt.show()
         plt.close(fig)
-        return None
-    snapshot, field, axis = info["snapshot"], info["field"], info["axis"]
-
-    # -- Save --------------------------------------------------------------
-    plt.tight_layout()
-    saved_path = None
-    if savefig:
-        os.makedirs(os.path.dirname(savefig) or ".", exist_ok=True)
-        fig.savefig(savefig, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
-        saved_path = savefig
-    elif save and out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-        out_fname = f"snap{snapshot}_{field}_axis{axis}{suffix}_three_panel.png"
-        saved_path = os.path.join(out_dir, out_fname)
-        fig.savefig(saved_path, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
-    if show:
-        plt.show()
-    plt.close(fig)
 
     if saved_path:
         print(f"Saved: {saved_path}")
@@ -822,7 +904,8 @@ def plot_axes_stack(snapshot, field, results, skymodel_dir, pbcor_dir, residual_
                      axes=("x", "y", "z"), zoom_factor=3, cmap="jet", dpi=130,
                      save=True, out_dir="figures", savefig=None, show=False,
                      suffix="", show_legend=True, show_info_box=True,
-                     crop_to_skymodel=True, fixed_au=None):
+                     crop_to_skymodel=True, fixed_au=None,
+                     paper=False, fig_width_in=16, row_height_in=4.2, fontsize=11):
     """Stack one snapshot/field's projection axes as rows of three zoomed
     panels each:
 
@@ -852,70 +935,94 @@ def plot_axes_stack(snapshot, field, results, skymodel_dir, pbcor_dir, residual_
     found" placeholder rather than aborting the whole figure. Returns None
     (and saves nothing) only if *no* row could be drawn.
 
+    paper, fig_width_in, row_height_in, fontsize : see ``plot_three_panel``
+    -- white/black AASTeX-scale styling instead of the dark QA theme, sized
+    so the on-page point size is correct at ``fig_width_in``. ``row_height_in``
+    applies per row here (total figure height = ``row_height_in * n_rows``).
+
     Returns
     -------
     str or None -- the path the figure was saved to, or None if not saved.
     """
-    n_rows = len(axes)
-    fig, axes_grid = plt.subplots(n_rows, 3, figsize=(24, 6 * n_rows),
-                                   gridspec_kw={"wspace": 0.35, "hspace": 0.4})
-    fig.patch.set_facecolor("#0d0d0d")
-    if n_rows == 1:
-        axes_grid = axes_grid[np.newaxis, :]
+    rc = plt.rc_context(_paper_rc(fontsize)) if paper else contextlib.nullcontext()
+    with rc:
+        n_rows = len(axes)
+        figsize = (fig_width_in, row_height_in * n_rows) if paper else (24, 6 * n_rows)
+        fig, axes_grid = plt.subplots(n_rows, 3, figsize=figsize,
+                                       gridspec_kw={"wspace": 0.35, "hspace": 0.4})
+        fig.patch.set_facecolor("white" if paper else "#0d0d0d")
+        if n_rows == 1:
+            axes_grid = axes_grid[np.newaxis, :]
 
-    n_drawn = 0
-    for row_idx, axis in enumerate(axes):
-        ax_sky, ax_obs, ax_res = axes_grid[row_idx]
-        for ax in (ax_sky, ax_obs, ax_res):
-            style_ax(ax)
+        n_drawn = 0
+        for row_idx, axis in enumerate(axes):
+            ax_sky, ax_obs, ax_res = axes_grid[row_idx]
+            for ax in (ax_sky, ax_obs, ax_res):
+                (style_ax_paper if paper else style_ax)(ax)
 
-        fit = results.get(snapshot, {}).get(field, {}).get(axis)
-        pbcor_fname = f"ALMA_snapshot_{snapshot}_axis_{axis}_{field}_sim_observed_pbcor{suffix}.fits"
-        pbcor_fpath = os.path.join(pbcor_dir, pbcor_fname)
+            fit = results.get(snapshot, {}).get(field, {}).get(axis)
+            pbcor_fname = f"ALMA_snapshot_{snapshot}_axis_{axis}_{field}_sim_observed_pbcor{suffix}.fits"
+            pbcor_fpath = os.path.join(pbcor_dir, pbcor_fname)
 
-        if fit is None:
-            print(f"[skip] snap {snapshot} | {field} | axis {axis}: no fit in results")
-            msg = f"axis {axis}\nno fit"
-        elif not os.path.exists(pbcor_fpath):
-            print(f"[skip] pbcor not found: {pbcor_fname}")
-            msg = f"axis {axis}\npbcor not found"
-        else:
-            info = render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
-                                    skymodel_dir, residual_dir, zoom_factor=zoom_factor,
-                                    cmap=cmap, suffix=suffix, fixed_au=fixed_au,
-                                    crop_to_skymodel=crop_to_skymodel,
-                                    show_legend=show_legend, show_info_box=show_info_box)
-            if info is not None:
-                n_drawn += 1
-                continue
-            msg = f"axis {axis}\nskymodel/residual not found"
+            if fit is None:
+                print(f"[skip] snap {snapshot} | {field} | axis {axis}: no fit in results")
+                msg = f"axis {axis}\nno fit"
+            elif not os.path.exists(pbcor_fpath):
+                print(f"[skip] pbcor not found: {pbcor_fname}")
+                msg = f"axis {axis}\npbcor not found"
+            else:
+                info = render_disk_row(fig, ax_sky, ax_obs, ax_res, pbcor_fpath, fit,
+                                        skymodel_dir, residual_dir, zoom_factor=zoom_factor,
+                                        cmap=cmap, suffix=suffix, fixed_au=fixed_au,
+                                        crop_to_skymodel=crop_to_skymodel,
+                                        show_legend=show_legend, show_info_box=show_info_box,
+                                        paper=paper)
+                if info is not None:
+                    n_drawn += 1
+                    continue
+                msg = f"axis {axis}\nskymodel/residual not found"
 
-        for ax in (ax_sky, ax_obs, ax_res):
-            ax.text(0.5, 0.5, msg, transform=ax.transAxes, color="red",
-                    ha="center", va="center")
+            for ax in (ax_sky, ax_obs, ax_res):
+                ax.text(0.5, 0.5, msg, transform=ax.transAxes, color="red",
+                        ha="center", va="center")
 
-    if n_drawn == 0:
+        if n_drawn == 0:
+            plt.close(fig)
+            print(f"[skip] snap {snapshot} | {field}: nothing drawn")
+            return None
+
+        variant = suffix.strip("_") or "thin"
+        fig.suptitle(f"snap {snapshot}  |  {field}  |  {variant}",
+                     color="black" if paper else "white", fontsize=13, y=1.005)
+
+        # No tight_layout() here (unlike the single-row plot_three_panel):
+        # with a suptitle sitting above the nominal figure box (y=1.005) plus
+        # the per-panel fig.colorbar() axes from render_disk_row -- which
+        # tight_layout doesn't track like regular Axes -- tight_layout
+        # (with or without an explicit rect) grossly overestimates the top
+        # margin it needs to reserve for the title across multiple rows,
+        # leaving a large blank band above row 0. Instead, pin the top/bottom
+        # margins to a fixed *absolute* inch amount via subplots_adjust: the
+        # default rcParams margins are fractions of the total figure height,
+        # so with row_height_in fixed per row they'd otherwise grow with
+        # n_rows (a 3-row figure gets 3x the single-row top margin, in
+        # inches, for the same one-line suptitle).
+        fig_h_in = fig.get_size_inches()[1]
+        margin_in = 0.55
+        fig.subplots_adjust(top=1 - margin_in / fig_h_in, bottom=margin_in / fig_h_in)
+        saved_path = None
+        if savefig:
+            os.makedirs(os.path.dirname(savefig) or ".", exist_ok=True)
+            fig.savefig(savefig, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
+            saved_path = savefig
+        elif save and out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+            out_fname = f"snap{snapshot}_{field}_axes_{''.join(axes)}_stack{suffix}.png"
+            saved_path = os.path.join(out_dir, out_fname)
+            fig.savefig(saved_path, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
+        if show:
+            plt.show()
         plt.close(fig)
-        print(f"[skip] snap {snapshot} | {field}: nothing drawn")
-        return None
-
-    variant = suffix.strip("_") or "thin"
-    fig.suptitle(f"snap {snapshot}  |  {field}  |  {variant}", color="white", fontsize=13, y=1.005)
-
-    plt.tight_layout()
-    saved_path = None
-    if savefig:
-        os.makedirs(os.path.dirname(savefig) or ".", exist_ok=True)
-        fig.savefig(savefig, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
-        saved_path = savefig
-    elif save and out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-        out_fname = f"snap{snapshot}_{field}_axes_{''.join(axes)}_stack{suffix}.png"
-        saved_path = os.path.join(out_dir, out_fname)
-        fig.savefig(saved_path, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
-    if show:
-        plt.show()
-    plt.close(fig)
 
     if saved_path:
         print(f"Saved: {saved_path}")
@@ -1064,7 +1171,7 @@ def add_row_label(ax, label, fontsize=11):
 
 def plot_gallery(snapshots, field, image_dir, kind="skymodel", results=None,
                   axes=("x", "y", "z"), suffix="", scaled=False,
-                  zoom_factor=3.0, fixed_au=None, rmaj_exclude=None,
+                  native_size=True, zoom_factor=3.0, fixed_au=None, rmaj_exclude=None,
                   cmap="jet", vmin_pct=0, vmax_pct=99.5, log_scale=False,
                   fig_width_in=7.1, row_height_in=2.3, fontsize=10,
                   dpi=300, save=True, out_dir="gallery_figures", savefig=None, show=False,
@@ -1072,12 +1179,25 @@ def plot_gallery(snapshots, field, image_dir, kind="skymodel", results=None,
     """Paper-quality gallery: one row per snapshot, one column per
     projection axis, for a single field/kind/variant.
 
-    Every panel in the gallery is cropped to the *same* physical field of
-    view (in AU) -- sized from ``results`` as ``zoom_factor`` times the
-    largest fitted Rmaj anywhere in the gallery, or, if no fit info is
-    available, the smallest native frame footprint among the loaded frames
-    -- so relative disk sizes are directly comparable by eye across rows and
-    columns. Pass ``fixed_au`` to set it explicitly instead.
+    By default (``native_size=True``) every panel is shown at its own
+    native pixel footprint -- exactly the frame ``skymodel_generation.py``/
+    ``casa_simulation.py`` wrote to disk, with no additional cropping or
+    zooming. Since ``casa_simulation.py`` now sizes each pbcor image's
+    imsize to match its own skymodel's angular footprint, this already
+    shows each panel at (approximately) one consistent physical scale
+    without having to force it via a shared FOV box -- and it stays
+    correct even for the snapshots where that isn't quite true (e.g. a
+    tiny model whose imsize got floored to ``imsize_min``), rather than
+    silently over- or under-cropping them to fit a shared box.
+
+    Pass ``native_size=False`` to fall back to the old behaviour instead:
+    every panel cropped to the *same* physical field of view (in AU) --
+    sized from ``results`` as ``zoom_factor`` times the largest fitted
+    Rmaj anywhere in the gallery, or, if no fit info is available, the
+    smallest native frame footprint among the loaded frames -- so relative
+    disk sizes are directly comparable by eye across rows and columns even
+    when native footprints differ a lot. Pass ``fixed_au`` to set that
+    shared FOV explicitly instead of deriving it from Rmaj.
 
     Parameters
     ----------
@@ -1088,23 +1208,29 @@ def plot_gallery(snapshots, field, image_dir, kind="skymodel", results=None,
                   ``pbcor_imgs`` folder for kind='pbcor').
     kind        : str  -- 'skymodel' (stage-1 sky model) or 'pbcor' (stage-2
                   CASA primary-beam-corrected observation).
-    results     : dict or None -- fitting_results.json contents (used only
-                  to size the shared field of view via Rmaj; not required).
+    results     : dict or None -- fitting_results.json contents. Only used
+                  (and only needed) when ``native_size=False``, to size the
+                  shared field of view via Rmaj.
     suffix      : str  -- "" for thin (default), "_SKIRT" for the SKIRT variant.
     scaled      : bool -- False (default): every panel is normalised to its
                   own data (one colorbar per panel). True: every panel shares
                   one colour norm taken from the brightest snapshot/axis in
                   the gallery, with a single colorbar for the whole figure.
+    native_size : bool -- True (default): show each panel at its own native
+                  frame footprint, no shared FOV. False: crop every panel to
+                  one shared FOV (see ``zoom_factor``/``fixed_au`` below).
     zoom_factor : float -- shared FOV half-width in units of the largest
-                  fitted Rmaj in the gallery (default: 3). Ignored when
-                  ``fixed_au`` is given.
+                  fitted Rmaj in the gallery (default: 3). Only used when
+                  ``native_size=False``; ignored when ``fixed_au`` is given.
     fixed_au    : float or None -- explicit shared physical half-width (AU),
-                  overriding the Rmaj-based sizing.
+                  overriding the Rmaj-based sizing. Only used when
+                  ``native_size=False``.
     rmaj_exclude : set of (snapshot, axis) or None -- entries to leave out
                   of the FOV sizing (their panels still render, cropped to
                   whatever FOV the rest of the gallery ends up with). See
                   ``_gallery_fixed_au`` for why this is manual rather than
-                  an automatic outlier filter.
+                  an automatic outlier filter. Only used when
+                  ``native_size=False``.
     fig_width_in, row_height_in : float -- figure width (AASTeX two-column
                   text width, 7.1 in, by default) and per-row height, inches.
     fontsize    : float -- base font size in points (AASTeX two-column body
@@ -1130,23 +1256,32 @@ def plot_gallery(snapshots, field, image_dir, kind="skymodel", results=None,
         print(f"[skip] gallery {kind} | {field}{suffix}: no frames found in {image_dir}")
         return None
 
-    # -- Resolve one shared physical field of view for the whole gallery ------
-    if fixed_au is None:
-        fixed_au = _gallery_fixed_au(snapshots, field, axes, results, zoom_factor, distance_pc,
-                                      exclude=rmaj_exclude)
-    if fixed_au is None:
-        fixed_au = min(frame_half_width_au(fr["nx"], fr["pix_as"], distance_pc) for fr in loaded)
-        print(f"[info] no Rmaj fits available -- shared FOV falls back to the smallest "
-              f"native frame footprint (±{fixed_au:.0f} AU)")
+    if native_size:
+        # Each panel keeps its own native pixel footprint -- no shared FOV,
+        # no Rmaj-based zoom, nothing forced to a common physical scale.
+        # What's plotted is exactly the full frame on disk.
+        for fr in loaded:
+            fr["crop"] = fr["data"]
+            fr["extent"] = (0, fr["nx"], 0, fr["ny"])
+            fr["view"] = (0, fr["nx"], 0, fr["ny"])
+    else:
+        # -- Resolve one shared physical field of view for the whole gallery --
+        if fixed_au is None:
+            fixed_au = _gallery_fixed_au(snapshots, field, axes, results, zoom_factor, distance_pc,
+                                          exclude=rmaj_exclude)
+        if fixed_au is None:
+            fixed_au = min(frame_half_width_au(fr["nx"], fr["pix_as"], distance_pc) for fr in loaded)
+            print(f"[info] no Rmaj fits available -- shared FOV falls back to the smallest "
+                  f"native frame footprint (±{fixed_au:.0f} AU)")
 
-    # -- Crop every frame to that shared FOV -----------------------------------
-    for fr in loaded:
-        x0, x1, y0, y1 = zoom_bounds(fr["cx"], fr["cy"], 0, fr["nx"], fr["ny"],
-                                      fixed_au=fixed_au, pix_as=fr["pix_as"], distance_pc=distance_pc)
-        cx0, cx1, cy0, cy1 = clip_to_frame((x0, x1, y0, y1), fr["nx"], fr["ny"])
-        fr["crop"] = fr["data"][cy0:cy1, cx0:cx1]
-        fr["extent"] = (cx0, cx1, cy0, cy1)
-        fr["view"] = (x0, x1, y0, y1)
+        # -- Crop every frame to that shared FOV -------------------------------
+        for fr in loaded:
+            x0, x1, y0, y1 = zoom_bounds(fr["cx"], fr["cy"], 0, fr["nx"], fr["ny"],
+                                          fixed_au=fixed_au, pix_as=fr["pix_as"], distance_pc=distance_pc)
+            cx0, cx1, cy0, cy1 = clip_to_frame((x0, x1, y0, y1), fr["nx"], fr["ny"])
+            fr["crop"] = fr["data"][cy0:cy1, cx0:cx1]
+            fr["extent"] = (cx0, cx1, cy0, cy1)
+            fr["view"] = (x0, x1, y0, y1)
 
     # -- Resolve the shared colour scale for scaled=True -----------------------
     shared_norm = None

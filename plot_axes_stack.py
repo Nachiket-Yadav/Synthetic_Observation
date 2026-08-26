@@ -83,6 +83,21 @@ def main():
     parser.add_argument("--no-legend", action="store_true",
                          help="Hide the per-panel FWHM-fit legends (default: shown).")
     parser.add_argument("--dpi", type=int, default=130, help="Figure DPI (default: 130).")
+    parser.add_argument("--paper", action="store_true",
+                         help="White background, black serif AASTeX-style text instead of the "
+                              "default dark QA theme -- for dropping into a manuscript (same "
+                              "colour/font treatment as plot_gallery.py). Does NOT default to "
+                              "AASTeX text-column width like plot_gallery.py does -- each row "
+                              "carries a per-panel colorbar and a dense info box that collide at "
+                              "7.1in, so --fig-width/--row-height default larger; size down "
+                              "explicitly (and/or pass --no-info-box) if you need in-column fit.")
+    parser.add_argument("--fig-width", type=float, default=16,
+                         help="Figure width in inches, only used with --paper (default: 16).")
+    parser.add_argument("--row-height", type=float, default=4.2,
+                         help="Per-row figure height in inches, only used with --paper "
+                              "(default: 4.2).")
+    parser.add_argument("--fontsize", type=float, default=11,
+                         help="Base font size in points, only used with --paper (default: 11).")
     args = parser.parse_args()
 
     suffix = "" if args.variant == "thin" else "_SKIRT"
@@ -111,6 +126,8 @@ def main():
                 dpi=args.dpi, savefig=os.path.join(args.out_dir, out_fname),
                 suffix=suffix, show_legend=not args.no_legend,
                 show_info_box=not args.no_info_box,
+                paper=args.paper, fig_width_in=args.fig_width,
+                row_height_in=args.row_height, fontsize=args.fontsize,
             )
             if saved:
                 n_saved += 1

@@ -18,6 +18,11 @@ One gallery = one (kind, field, colour mode) combination:
             or 'scaled' (every panel shares one colour norm taken from the
             brightest snapshot/axis in the gallery, one shared colorbar)
 
+Each panel is shown at its own native frame footprint by default (no
+cropping/zooming, nothing forced into a shared field-of-view "box") --
+pass --shared-fov to instead crop every panel to one common physical FOV
+sized from Rmaj, the old behaviour.
+
 Usage
 -----
 Default run makes all 8 thin-variant galleries (2 kinds x 2 fields x
@@ -88,13 +93,18 @@ def main():
                               "frame footprint in that gallery.")
     parser.add_argument("--out-dir", default="gallery_figures",
                          help="Folder to write PNG figures to (default: gallery_figures).")
+    parser.add_argument("--shared-fov", action="store_true",
+                         help="Crop every panel to one shared physical field of view instead of "
+                              "each panel's own native frame footprint (the default). The shared "
+                              "FOV is sized from --zoom-factor x the largest fitted Rmaj in the "
+                              "gallery (or --fixed-au explicitly).")
     parser.add_argument("--zoom-factor", type=float, default=3.0,
                          help="Shared field-of-view half-width, in units of the largest fitted "
-                              "Rmaj anywhere in the gallery (default: 3). Ignored when "
-                              "--fixed-au is given.")
+                              "Rmaj anywhere in the gallery (default: 3). Only used with "
+                              "--shared-fov; ignored when --fixed-au is given.")
     parser.add_argument("--fixed-au", type=float, default=None,
                          help="Explicit shared physical half-width (AU) for every gallery, "
-                              "overriding the Rmaj-based sizing.")
+                              "overriding the Rmaj-based sizing. Only used with --shared-fov.")
     parser.add_argument("--rmaj-exclude", nargs="+", default=None, metavar="SNAPSHOT:AXIS",
                          help="Leave these snapshot/axis fits out of the shared-FOV sizing, "
                               "e.g. --rmaj-exclude 417:z. Their own panel still renders, cropped "
@@ -103,7 +113,8 @@ def main():
                               "a genuinely extended structure rather than a bad fit (checked by "
                               "eye, not inferred from fit-quality stats, which don't reliably "
                               "tell the two apart in this pipeline). Applies to every gallery "
-                              "in this run, so only pass axes you've confirmed for every field.")
+                              "in this run, so only pass axes you've confirmed for every field. "
+                              "Only used with --shared-fov.")
     parser.add_argument("--cmap", default="jet", help="Colormap (default: jet).")
     parser.add_argument("--log-scale", action="store_true",
                          help="Log-scale the colour norm instead of linear (default: linear).")
@@ -123,12 +134,13 @@ def main():
         results_path = "fitting_results.json" if args.variant == "thin" else "fitting_results_skirt.json"
 
     results = None
-    if os.path.exists(results_path):
-        with open(results_path, "r") as f:
-            results = json.load(f)
-    else:
-        print(f"[warn] {results_path} not found -- each gallery's shared field of view will "
-              f"fall back to its smallest native frame footprint instead of a Rmaj-based one.")
+    if args.shared_fov:
+        if os.path.exists(results_path):
+            with open(results_path, "r") as f:
+                results = json.load(f)
+        else:
+            print(f"[warn] {results_path} not found -- each gallery's shared field of view will "
+                  f"fall back to its smallest native frame footprint instead of a Rmaj-based one.")
 
     image_dir_for_kind = {"skymodel": args.skymodel_dir, "pbcor": args.pbcor_dir}
 
@@ -151,7 +163,8 @@ def main():
                 saved = plot_gallery(
                     args.snapshots, field, image_dir_for_kind[kind],
                     kind=kind, results=results, axes=args.axes, suffix=suffix,
-                    scaled=scaled, zoom_factor=args.zoom_factor, fixed_au=args.fixed_au,
+                    scaled=scaled, native_size=not args.shared_fov,
+                    zoom_factor=args.zoom_factor, fixed_au=args.fixed_au,
                     rmaj_exclude=rmaj_exclude,
                     cmap=args.cmap, log_scale=args.log_scale,
                     fig_width_in=args.fig_width, row_height_in=args.row_height,

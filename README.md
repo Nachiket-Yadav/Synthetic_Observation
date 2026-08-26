@@ -215,10 +215,12 @@ With no arguments this writes 8 PNGs to `gallery_figures/`: for both
 `skymodel` (stage-1 input) and `pbcor` (stage-2 CASA observation), for both
 `Orion` and `Perseus`, in both `scaled` and `unscaled` colour variants. Rows
 are the snapshots currently under investigation (169, 171, 106, 307, 417,
-319, 320, 323, 346), columns are the x/y/z projection axes. Every panel in
-one gallery is cropped to the same shared physical field of view -- sized
-from the largest fitted `Rmaj` in `fitting_results.json` -- so disk sizes
-are directly comparable across the grid. `unscaled` gives each panel its own
+319, 320, 323, 346), columns are the x/y/z projection axes. Every panel is
+shown at its own native frame footprint -- no cropping or zooming, nothing
+forced into a shared field-of-view box -- since `casa_simulation.py` now
+sizes each pbcor image's `imsize` to match its own skymodel's angular
+footprint, panels already land at (approximately) one consistent physical
+scale without having to force it. `unscaled` gives each panel its own
 colour norm and colorbar; `scaled` shares one colour norm (and one colorbar)
 taken from the brightest snapshot/axis in the gallery, so the fainter disks
 read as visibly fainter rather than each being auto-stretched to fill its
@@ -239,13 +241,19 @@ Once SKIRT sky models/observations exist for these snapshots, add
 instead (reads `*_SKIRT` files and `fitting_results_skirt.json` by default).
 Run `python plot_gallery.py --help` for the full list of options.
 
-**A large `Rmaj` is not automatically treated as a bad fit.** The shared
-FOV is sized off the *largest* fitted `Rmaj` in the gallery, and a
-disk/envelope can legitimately be far more extended than the rest of the
-set (checked by eye against its own skymodel/pbcor image, not inferred from
-fit-quality stats -- a spurious fit and a real extended structure have
-shown up with equally good S/N and residual fraction in this pipeline). If
-one snapshot really is a fit failure, leave it out of the FOV sizing with
+**Prefer a shared field of view instead?** Pass `--shared-fov` to crop
+every panel in a gallery to one common physical FOV sized from
+`--zoom-factor` x the largest fitted `Rmaj` in `fitting_results.json` (or
+`--fixed-au` explicitly), the old behaviour -- useful when native footprints
+genuinely differ enough that eyeballing relative disk sizes across the grid
+matters more than seeing each panel exactly as imaged. **A large `Rmaj` is
+not automatically treated as a bad fit** in that mode: the shared FOV is
+sized off the *largest* fitted `Rmaj` in the gallery, and a disk/envelope
+can legitimately be far more extended than the rest of the set (checked by
+eye against its own skymodel/pbcor image, not inferred from fit-quality
+stats -- a spurious fit and a real extended structure have shown up with
+equally good S/N and residual fraction in this pipeline). If one snapshot
+really is a fit failure, leave it out of the FOV sizing with
 `--rmaj-exclude <snapshot>:<axis>` (its own panel still renders, just
 cropped to whatever FOV the rest of the gallery ends up with) rather than
 relying on an automatic outlier filter.

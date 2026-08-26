@@ -1,5 +1,8 @@
 *.fits
 *.hdf5
 *.png
+*.xlsx
+*.md
+*.pdf
 __pycache__/
 *.pyc
